@@ -102,6 +102,66 @@ function formatJobStatus(status: ExtractionJobStatus | "") {
   }
 }
 
+function buildAppliedItems(result: StructuredDraft | null) {
+  if (!result) return [] as string[];
+
+  const items: string[] = [];
+
+  if (result.patientName.trim()) items.push("Patient name filled");
+  if (result.caseNumber.trim()) items.push("MRN / case number filled");
+  if (result.significantHistory.trim()) items.push("History added");
+  if (result.medications.length > 0) {
+    items.push(
+      `${result.medications.length} medication${
+        result.medications.length > 1 ? "s" : ""
+      } added`,
+    );
+  }
+
+  return items;
+}
+
+function buildReviewItems(result: StructuredDraft | null) {
+  if (!result) return [] as { label: string; value: string }[];
+
+  const items: { label: string; value: string }[] = [];
+
+  if (result.age.trim()) items.push({ label: "Age", value: result.age.trim() });
+  if (result.sex.trim()) items.push({ label: "Sex", value: result.sex.trim() });
+  if (result.chiefComplaint.trim()) {
+    items.push({
+      label: "Chief complaint",
+      value: result.chiefComplaint.trim(),
+    });
+  }
+  if (result.associatedSymptoms.length > 0) {
+    items.push({
+      label: "Associated symptoms",
+      value: result.associatedSymptoms.join(", "),
+    });
+  }
+  if (result.examFindings.trim()) {
+    items.push({ label: "Exam findings", value: result.examFindings.trim() });
+  }
+  if (result.labSummary.trim()) {
+    items.push({ label: "Lab summary", value: result.labSummary.trim() });
+  }
+  if (result.imagingSummary.trim()) {
+    items.push({
+      label: "Imaging summary",
+      value: result.imagingSummary.trim(),
+    });
+  }
+  if (result.diagnosisHints.length > 0) {
+    items.push({
+      label: "Diagnosis hints",
+      value: result.diagnosisHints.join(", "),
+    });
+  }
+
+  return items;
+}
+
 export default function VoiceScribe({ onApply }: VoiceScribeProps) {
   const [isRecording, setIsRecording] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
@@ -171,7 +231,7 @@ export default function VoiceScribe({ onApply }: VoiceScribeProps) {
       if (data.status === "done") {
         clearPolling();
         setResult(data.result);
-        setStatus("Structured medical draft is ready");
+        setStatus("Applied to the report form");
         onApply?.(data.result);
         return;
       }
@@ -435,8 +495,8 @@ export default function VoiceScribe({ onApply }: VoiceScribeProps) {
             AI Medical Scribe
           </h2>
           <p className="mt-1 text-sm text-neutral-600">
-            Record or upload visit audio, transcribe mixed Arabic and English,
-            then generate a structured medical draft.
+            Record or upload visit audio, then auto-fill the report with mapped
+            patient details, history, and medications.
           </p>
         </div>
 
@@ -535,19 +595,78 @@ export default function VoiceScribe({ onApply }: VoiceScribeProps) {
         <div className="overflow-hidden rounded-3xl border border-neutral-200">
           <div className="border-b border-neutral-200 bg-neutral-50 px-4 py-3">
             <h3 className="text-sm font-semibold text-neutral-900">
-              Structured Draft
+              Auto-apply summary
             </h3>
             <p className="mt-1 text-xs text-neutral-500">
-              Extracted medical fields ready to be applied to the report form.
+              Shows what was applied automatically and what still needs manual
+              review.
             </p>
           </div>
 
           <div className="min-h-[260px] bg-white p-4">
-            <pre className="whitespace-pre-wrap break-words text-sm leading-6 text-neutral-700">
-              {result
-                ? JSON.stringify(result, null, 2)
-                : "No structured draft yet."}
-            </pre>
+            {!result ? (
+              <div className="rounded-2xl border border-dashed border-neutral-200 bg-neutral-50 p-4 text-sm text-neutral-500">
+                No extraction yet. Record or upload audio to apply it to the
+                form.
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+                  <div className="text-sm font-semibold text-emerald-900">
+                    Applied to report form
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {buildAppliedItems(result).length > 0 ? (
+                      buildAppliedItems(result).map((item) => (
+                        <span
+                          key={item}
+                          className="rounded-full border border-emerald-200 bg-white px-3 py-1 text-xs font-semibold text-emerald-800"
+                        >
+                          {item}
+                        </span>
+                      ))
+                    ) : (
+                      <span className="text-sm text-emerald-900">
+                        No matching form fields were auto-filled.
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {buildReviewItems(result).length > 0 && (
+                  <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                    <div className="text-sm font-semibold text-amber-900">
+                      Needs manual review
+                    </div>
+                    <p className="mt-1 text-xs text-amber-800">
+                      These details were extracted but are not mapped to printed
+                      fields yet.
+                    </p>
+                    <div className="mt-3 space-y-2 text-sm text-amber-950">
+                      {buildReviewItems(result).map((item) => (
+                        <div key={`${item.label}-${item.value}`}>
+                          <span className="font-semibold">{item.label}:</span>{" "}
+                          {item.value}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {result.warnings.length > 0 && (
+                  <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4">
+                    <div className="text-sm font-semibold text-rose-900">
+                      Review flags
+                    </div>
+                    <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-rose-900">
+                      {result.warnings.map((warning) => (
+                        <li key={warning}>{warning}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </div>

@@ -542,7 +542,6 @@ export default function Page() {
 
   function applyScribeDraft(draft: ScribeDraft) {
     const meds = Array.isArray(draft?.medications) ? draft.medications : [];
-    const noteLines: string[] = [];
 
     if (draft.patientName?.trim()) {
       setPatientName((prev) => prev.trim() || draft.patientName!.trim());
@@ -552,46 +551,12 @@ export default function Page() {
       setMrn((prev) => prev.trim() || draft.caseNumber!.trim());
     }
 
-    if (draft.age?.trim()) {
-      noteLines.push(`Extracted age: ${draft.age.trim()}`);
-    }
-
-    if (draft.sex?.trim()) {
-      noteLines.push(`Extracted sex: ${draft.sex.trim()}`);
-    }
-
-    if (draft.chiefComplaint?.trim()) {
-      noteLines.push(`Chief complaint: ${draft.chiefComplaint.trim()}`);
-    }
-
     if (draft.significantHistory?.trim()) {
       setSignificantHistory((prev) =>
         prev.trim()
           ? `${prev}\n${draft.significantHistory!.trim()}`
           : draft.significantHistory!.trim(),
       );
-    }
-
-    if (draft.associatedSymptoms?.length) {
-      noteLines.push(
-        `Associated symptoms: ${draft.associatedSymptoms.join(", ")}`,
-      );
-    }
-
-    if (draft.examFindings?.trim()) {
-      noteLines.push(`Exam findings: ${draft.examFindings.trim()}`);
-    }
-
-    if (draft.labSummary?.trim()) {
-      noteLines.push(`Lab summary: ${draft.labSummary.trim()}`);
-    }
-
-    if (draft.imagingSummary?.trim()) {
-      noteLines.push(`Imaging summary: ${draft.imagingSummary.trim()}`);
-    }
-
-    if (draft.diagnosisHints?.length) {
-      noteLines.push(`Diagnosis hints: ${draft.diagnosisHints.join(", ")}`);
     }
 
     let addedCount = 0;
@@ -628,16 +593,6 @@ export default function Page() {
           }
 
           if (secIndex === -1) {
-            noteLines.push(
-              `Medication mention without mapped system: ${[
-                medication,
-                item.dose || "",
-                item.how || "",
-                item.purpose || "",
-              ]
-                .join(" ")
-                .trim()}`,
-            );
             skippedCount++;
             continue;
           }
@@ -671,37 +626,41 @@ export default function Page() {
       });
     }
 
-    if (draft.transcript?.trim()) {
-      noteLines.push(`Voice transcript:\n${draft.transcript.trim()}`);
-    }
-
-    if (noteLines.length > 0) {
-      setNotes((prev) => {
-        const current = prev.trim();
-        const block = noteLines.join("\n");
-        return current ? `${current}\n\n${block}` : block;
-      });
-    }
-
-    const summary: string[] = [];
-    if (draft.patientName?.trim()) summary.push("patient name");
-    if (draft.caseNumber?.trim()) summary.push("case number");
-    if (draft.age?.trim()) summary.push("age");
-    if (draft.sex?.trim()) summary.push("sex");
-    if (draft.chiefComplaint?.trim()) summary.push("complaint");
-    if (draft.significantHistory?.trim()) summary.push("history");
-    if (draft.labSummary?.trim()) summary.push("labs");
-    if (draft.imagingSummary?.trim()) summary.push("imaging");
+    const appliedSummary: string[] = [];
+    if (draft.patientName?.trim()) appliedSummary.push("patient name");
+    if (draft.caseNumber?.trim()) appliedSummary.push("case number");
+    if (draft.significantHistory?.trim()) appliedSummary.push("history");
     if (addedCount > 0) {
-      summary.push(`${addedCount} medication${addedCount > 1 ? "s" : ""}`);
+      appliedSummary.push(
+        `${addedCount} medication${addedCount > 1 ? "s" : ""}`,
+      );
+    }
+
+    const reviewCount = [
+      draft.age?.trim(),
+      draft.sex?.trim(),
+      draft.chiefComplaint?.trim(),
+      draft.associatedSymptoms?.length ? "symptoms" : "",
+      draft.examFindings?.trim(),
+      draft.labSummary?.trim(),
+      draft.imagingSummary?.trim(),
+      draft.diagnosisHints?.length ? "diagnosis hints" : "",
+      draft.warnings?.length ? "warnings" : "",
+    ].filter(Boolean).length;
+
+    const summary = [...appliedSummary];
+    if (reviewCount > 0) {
+      summary.push(`${reviewCount} review item${reviewCount > 1 ? "s" : ""}`);
     }
     if (skippedCount > 0) summary.push(`${skippedCount} skipped`);
 
     showToast({
       message:
-        summary.length > 0
+        appliedSummary.length > 0
           ? `Applied: ${summary.join(" • ")}`
-          : "Transcript applied to notes only.",
+          : summary.length > 0
+            ? `Processed: ${summary.join(" • ")}`
+            : "Nothing new was applied.",
     });
 
     setTab("meds");
