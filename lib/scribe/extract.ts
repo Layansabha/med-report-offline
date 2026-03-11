@@ -46,6 +46,7 @@ type GroqChatCompletionResponse = {
 
 const GROQ_BASE_URL =
   process.env.GROQ_BASE_URL || "https://api.groq.com/openai/v1";
+
 const DEFAULT_TEXT_MODEL = process.env.GROQ_TEXT_MODEL || "openai/gpt-oss-20b";
 
 const STRICT_SCHEMA_MODELS = new Set([
@@ -60,30 +61,6 @@ const BEST_EFFORT_SCHEMA_MODELS = new Set([
   "meta-llama/llama-4-scout-17b-16e-instruct",
   "meta-llama/llama-4-maverick-17b-128e-instruct",
 ]);
-
-const NUMBER_WORDS: Record<string, string> = {
-  zero: "0",
-  one: "1",
-  two: "2",
-  three: "3",
-  four: "4",
-  five: "5",
-  six: "6",
-  seven: "7",
-  eight: "8",
-  nine: "9",
-  ten: "10",
-  eleven: "11",
-  twelve: "12",
-  thirteen: "13",
-  fourteen: "14",
-  fifteen: "15",
-  sixteen: "16",
-  seventeen: "17",
-  eighteen: "18",
-  nineteen: "19",
-  twenty: "20",
-};
 
 function compactText(input: string) {
   return (input || "").replace(/\s+/g, " ").trim();
@@ -109,10 +86,6 @@ function dedupeStrings(values: string[]) {
   }
 
   return out;
-}
-
-function uniqueWarnings(values: string[]) {
-  return dedupeStrings(values);
 }
 
 function cleanJsonText(text: string) {
@@ -148,189 +121,8 @@ function safeParseJson<T>(text: string): T | null {
   }
 }
 
-function removeTeachingNoise(transcript: string) {
-  let t = transcript || "";
-
-  const patterns = [
-    /what'?s the most likely diagnosis\??/gi,
-    /choice\s+[a-e]\s+(?:is|=)?.*?(?=(choice\s+[a-e])|$)/gi,
-    /question number\s+\w+.*?(?=(question number\s+\w+)|$)/gi,
-    /the second question.*$/gi,
-    /the third question.*$/gi,
-    /so those are the questions.*$/gi,
-    /let me know what you think.*$/gi,
-    /in the comment section.*$/gi,
-    /what can you do for this patient\??/gi,
-    /how do you treat this patient\??/gi,
-    /what is the path of pathophysiology.*$/gi,
-  ];
-
-  for (const pattern of patterns) {
-    t = t.replace(pattern, " ");
-  }
-
-  return compactText(t);
-}
-
 function normalizeForMatch(input: string) {
   return safeString(input).toLowerCase();
-}
-
-function extractCaseNumber(transcript: string) {
-  const digitMatch =
-    transcript.match(/\bcase number[:\s-]*(\d+)\b/i) ||
-    transcript.match(/\bmrn[:\s-]*([a-zA-Z0-9-]+)\b/i) ||
-    transcript.match(/\bfile number[:\s-]*([a-zA-Z0-9-]+)\b/i);
-
-  if (digitMatch?.[1]) return digitMatch[1].trim();
-
-  const wordMatch = transcript.match(/\bcase number[:\s-]*([a-zA-Z]+)\b/i);
-  if (wordMatch?.[1]) {
-    const word = wordMatch[1].toLowerCase().trim();
-    return NUMBER_WORDS[word] || word;
-  }
-
-  return "";
-}
-
-function fallbackAge(transcript: string) {
-  const match =
-    transcript.match(/\b(\d{1,3})\s*year[s]?\s*old\b/i) ||
-    transcript.match(/\bage[:\s-]*(\d{1,3})\b/i);
-
-  return match?.[1]?.trim() || "";
-}
-
-function fallbackSex(transcript: string) {
-  if (/\bfemale\b/i.test(transcript)) return "Female";
-  if (/\bmale\b/i.test(transcript)) return "Male";
-  if (/أنثى|انثى|امرأة|امراه|سيدة|سيده/i.test(transcript)) return "Female";
-  if (/ذكر|رجل/i.test(transcript)) return "Male";
-  return "";
-}
-
-function fallbackChiefComplaint(transcript: string) {
-  const patterns = [
-    /\bcomes to the emergency room with complaint of ([^.]+)/i,
-    /\bcomplaint of ([^.]+)/i,
-    /\bcomplains of ([^.]+)/i,
-    /\bpresents with ([^.]+)/i,
-    /\bpresenting complaint[:\s-]*([^.]+)/i,
-  ];
-
-  for (const pattern of patterns) {
-    const match = transcript.match(pattern);
-    if (match?.[1]) return compactText(match[1]);
-  }
-
-  return "";
-}
-
-function fallbackHistory(transcript: string) {
-  const patterns = [
-    /\bwith history of ([^.]+)/i,
-    /\bhistory of ([^.]+)/i,
-    /\bknown case of ([^.]+)/i,
-  ];
-
-  for (const pattern of patterns) {
-    const match = transcript.match(pattern);
-    if (match?.[1]) return compactText(match[1]);
-  }
-
-  return "";
-}
-
-function fallbackDiagnosisHints(transcript: string) {
-  const t = transcript.toLowerCase();
-  const out: string[] = [];
-
-  if (t.includes("small bowel obstruction") || /\bsbo\b/i.test(transcript)) {
-    out.push("Small bowel obstruction");
-  }
-
-  if (
-    t.includes("biliary calculus") ||
-    t.includes("biliary calculi") ||
-    t.includes("biliary stones") ||
-    t.includes("stones in the biliary tree")
-  ) {
-    out.push("Biliary calculus");
-  }
-
-  if (t.includes("gallstone ileus")) out.push("Gallstone ileus");
-  if (t.includes("type 2 diabetes")) out.push("Type 2 diabetes");
-  if (t.includes("hypertension")) out.push("Hypertension");
-
-  return dedupeStrings(out);
-}
-
-function fallbackSymptoms(transcript: string) {
-  const out: string[] = [];
-  const t = transcript.toLowerCase();
-
-  if (t.includes("nausea")) out.push("nausea");
-  if (t.includes("vomiting")) out.push("vomiting");
-  if (t.includes("fever")) out.push("fever");
-  if (t.includes("diarrhea")) out.push("diarrhea");
-  if (t.includes("constipation")) out.push("constipation");
-  if (t.includes("colicky pain")) out.push("colicky pain");
-  if (t.includes("abdominal pain")) out.push("abdominal pain");
-
-  return dedupeStrings(out);
-}
-
-function fallbackExamFindings(transcript: string) {
-  const t = transcript.toLowerCase();
-  const findings: string[] = [];
-
-  if (t.includes("abdominal distension")) findings.push("abdominal distension");
-  if (t.includes("diminished bowel sounds"))
-    findings.push("diminished bowel sounds");
-  if (t.includes("tenderness")) findings.push("tenderness");
-
-  return dedupeStrings(findings).join(", ");
-}
-
-function fallbackLabSummary(transcript: string) {
-  const parts: string[] = [];
-  const t = transcript;
-
-  if (/wbc|cbc|y count/i.test(t)) {
-    const match = t.match(/(?:wbc|y count|cbc)[^.]{0,120}/i);
-    if (match?.[0]) parts.push(compactText(match[0]));
-  }
-
-  if (/hemoglobin/i.test(t)) {
-    const match = t.match(/hemoglobin[^.]{0,80}/i);
-    if (match?.[0]) parts.push(compactText(match[0]));
-  }
-
-  if (/electrolytes are normal/i.test(t)) parts.push("electrolytes normal");
-  if (/lfts?/i.test(t) && /normal/i.test(t)) parts.push("LFTs normal");
-  if (/lipase/i.test(t) && /normal/i.test(t)) parts.push("lipase normal");
-
-  return dedupeStrings(parts).join(", ");
-}
-
-function fallbackImagingSummary(transcript: string) {
-  const t = transcript.toLowerCase();
-  const parts: string[] = [];
-
-  if (t.includes("small bowel obstruction") || t.includes("sbo")) {
-    parts.push("small bowel obstruction");
-  }
-
-  if (
-    t.includes("biliary calculus") ||
-    t.includes("biliary calculi") ||
-    t.includes("biliary stones") ||
-    t.includes("stones in the biliary tree")
-  ) {
-    parts.push("biliary calculus or stones");
-  }
-
-  return dedupeStrings(parts).join(", ");
 }
 
 function normalizeMedication(value: unknown): ScribeMedication {
@@ -374,42 +166,8 @@ function normalizeStructuredPayload(value: unknown): StructuredPayload {
           .filter((item) => item.medication)
       : [],
     warnings: Array.isArray(payload.warnings)
-      ? uniqueWarnings(payload.warnings.map((item) => safeString(item)))
+      ? dedupeStrings(payload.warnings.map((item) => safeString(item)))
       : [],
-  };
-}
-
-function mapMedicationToSystem(
-  med: ScribeMedication,
-  systemCatalog: SystemCatalogEntry[],
-): ScribeMedication {
-  const systemId = safeString(med.systemId);
-  const diagnosis = safeString(med.diagnosis);
-
-  if (systemId) return med;
-
-  const diagnosisNorm = normalizeForMatch(diagnosis);
-  if (!diagnosisNorm) return med;
-
-  const matched = systemCatalog.find((system) => {
-    const diagnosisName = normalizeForMatch(system.diagnosis || "");
-    const systemName = normalizeForMatch(system.name || "");
-
-    return (
-      diagnosisNorm === diagnosisName ||
-      diagnosisNorm === systemName ||
-      diagnosisName.includes(diagnosisNorm)
-    );
-  });
-
-  if (!matched) {
-    return med;
-  }
-
-  return {
-    ...med,
-    systemId: matched.id,
-    diagnosis: diagnosis || matched.diagnosis || matched.name || "",
   };
 }
 
@@ -431,6 +189,42 @@ async function loadSystemCatalog(): Promise<SystemCatalogEntry[]> {
   } catch {
     return [];
   }
+}
+
+function mapMedicationToSystem(
+  medication: ScribeMedication,
+  systemCatalog: SystemCatalogEntry[],
+): ScribeMedication {
+  if (medication.systemId) {
+    return medication;
+  }
+
+  const diagnosisNorm = normalizeForMatch(medication.diagnosis);
+  if (!diagnosisNorm) {
+    return medication;
+  }
+
+  const matched = systemCatalog.find((system) => {
+    const diagnosisName = normalizeForMatch(system.diagnosis || "");
+    const systemName = normalizeForMatch(system.name || "");
+
+    return (
+      diagnosisNorm === diagnosisName ||
+      diagnosisNorm === systemName ||
+      diagnosisName.includes(diagnosisNorm) ||
+      systemName.includes(diagnosisNorm)
+    );
+  });
+
+  if (!matched) {
+    return medication;
+  }
+
+  return {
+    ...medication,
+    systemId: matched.id,
+    diagnosis: medication.diagnosis || matched.diagnosis || matched.name || "",
+  };
 }
 
 function buildSchema() {
@@ -549,16 +343,19 @@ function buildPrompts(
     : "No systems catalog provided.";
 
   const systemPrompt = [
-    "You extract structured medical data from a clinical transcript.",
-    "The transcript may mix Arabic and English.",
+    "You are a medical scribe extraction engine.",
+    "Your task is to convert a clinical transcript into structured JSON.",
+    "The transcript may contain mixed Arabic and English speech.",
     "Return JSON only.",
-    'Unknown strings must be "".',
-    "Unknown arrays must be [].",
+    "All output fields should be in English whenever reasonably possible.",
+    "Keep medication names, brand names, abbreviations, dosages, numbers, and identifiers exactly as spoken when needed.",
     "Do not invent facts.",
-    "Do not translate medication names unless the transcript already says them in English.",
-    "Preserve numbers, ages, dosages, case numbers, and medication names exactly as spoken whenever possible.",
-    "Medication list must contain only explicit medication instructions.",
-    "If no confident system match exists, keep systemId and diagnosis empty.",
+    'If a field is unknown, return an empty string "".',
+    "If an array field is unknown, return [].",
+    "Only include medications that are explicitly stated in the transcript.",
+    "Only include diagnosis hints that are explicitly supported by the transcript.",
+    "If no confident system match exists, leave systemId empty.",
+    "Do not add commentary outside the JSON object.",
   ].join(" ");
 
   const userPrompt = [
@@ -653,7 +450,7 @@ async function callGroqExtraction(
   if (!parsed && primaryResponseFormat.type !== "json_object") {
     content = await requestGroqExtraction({
       model,
-      systemPrompt: `${systemPrompt} Return a valid JSON object only. No prose, no markdown.`,
+      systemPrompt: `${systemPrompt} Return a valid JSON object only. No markdown. No prose.`,
       userPrompt,
       responseFormat: { type: "json_object" },
     });
@@ -662,7 +459,9 @@ async function callGroqExtraction(
   }
 
   if (!parsed) {
-    throw new Error(`Failed to parse Groq JSON: ${content}`);
+    throw new Error(
+      `Failed to parse structured JSON from model output: ${content}`,
+    );
   }
 
   return normalizeStructuredPayload(parsed);
@@ -692,76 +491,27 @@ export async function extractStructuredDraft(
     };
   }
 
-  const cleanedTranscript = removeTeachingNoise(transcript) || transcript;
   const systemCatalog = await loadSystemCatalog();
-  const structured = await callGroqExtraction(cleanedTranscript, systemCatalog);
+  const structured = await callGroqExtraction(transcript, systemCatalog);
 
-  const finalCaseNumber =
-    structured.caseNumber || extractCaseNumber(transcript);
-  const finalAge = structured.age || fallbackAge(transcript);
-  const finalSex = structured.sex || fallbackSex(transcript);
-  const finalChiefComplaint =
-    structured.chiefComplaint || fallbackChiefComplaint(cleanedTranscript);
-  const finalHistory =
-    structured.significantHistory || fallbackHistory(cleanedTranscript);
-
-  const finalSymptoms = dedupeStrings([
-    ...(structured.associatedSymptoms || []),
-    ...fallbackSymptoms(cleanedTranscript),
-  ]);
-
-  const finalExam =
-    structured.examFindings || fallbackExamFindings(cleanedTranscript);
-
-  const finalLabs =
-    structured.labSummary || fallbackLabSummary(cleanedTranscript);
-
-  const finalImaging =
-    structured.imagingSummary || fallbackImagingSummary(cleanedTranscript);
-
-  const finalDiagnosisHints = dedupeStrings([
-    ...(structured.diagnosisHints || []),
-    ...fallbackDiagnosisHints(cleanedTranscript),
-  ]);
-
-  const finalMedications = Array.isArray(structured.medications)
-    ? structured.medications
-        .map((medication) => mapMedicationToSystem(medication, systemCatalog))
-        .filter((medication) => medication.medication)
-    : [];
-
-  const warnings = uniqueWarnings([
-    ...(structured.warnings || []),
-    !structured.age && finalAge ? "Age filled from transcript fallback." : "",
-    !structured.sex && finalSex ? "Sex filled from transcript fallback." : "",
-    !structured.caseNumber && finalCaseNumber
-      ? "Case number filled from transcript fallback."
-      : "",
-    !structured.chiefComplaint && finalChiefComplaint
-      ? "Chief complaint filled from transcript fallback."
-      : "",
-    !structured.significantHistory && finalHistory
-      ? "History filled from transcript fallback."
-      : "",
-    !structured.diagnosisHints?.length && finalDiagnosisHints.length
-      ? "Diagnosis hints filled from transcript fallback."
-      : "",
-  ]);
+  const medications = structured.medications.map((item) =>
+    mapMedicationToSystem(item, systemCatalog),
+  );
 
   return {
     transcript,
-    patientName: structured.patientName || "",
-    caseNumber: finalCaseNumber,
-    age: finalAge,
-    sex: finalSex,
-    chiefComplaint: finalChiefComplaint,
-    significantHistory: finalHistory,
-    associatedSymptoms: finalSymptoms,
-    examFindings: finalExam,
-    labSummary: finalLabs,
-    imagingSummary: finalImaging,
-    diagnosisHints: finalDiagnosisHints,
-    medications: finalMedications,
-    warnings,
+    patientName: structured.patientName,
+    caseNumber: structured.caseNumber,
+    age: structured.age,
+    sex: structured.sex,
+    chiefComplaint: structured.chiefComplaint,
+    significantHistory: structured.significantHistory,
+    associatedSymptoms: dedupeStrings(structured.associatedSymptoms),
+    examFindings: structured.examFindings,
+    labSummary: structured.labSummary,
+    imagingSummary: structured.imagingSummary,
+    diagnosisHints: dedupeStrings(structured.diagnosisHints),
+    medications,
+    warnings: dedupeStrings(structured.warnings),
   };
 }

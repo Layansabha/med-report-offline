@@ -87,11 +87,26 @@ function fileExtensionFromMimeType(mimeType: string): string {
   return "webm";
 }
 
+function formatJobStatus(status: ExtractionJobStatus | "") {
+  switch (status) {
+    case "queued":
+      return "Queued";
+    case "processing":
+      return "Processing";
+    case "done":
+      return "Completed";
+    case "error":
+      return "Failed";
+    default:
+      return "";
+  }
+}
+
 export default function VoiceScribe({ onApply }: VoiceScribeProps) {
   const [isRecording, setIsRecording] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
-  const [status, setStatus] = useState("جاهز");
+  const [status, setStatus] = useState("Ready");
   const [transcript, setTranscript] = useState("");
   const [detectedLanguage, setDetectedLanguage] = useState("");
   const [jobId, setJobId] = useState("");
@@ -156,7 +171,7 @@ export default function VoiceScribe({ onApply }: VoiceScribeProps) {
       if (data.status === "done") {
         clearPolling();
         setResult(data.result);
-        setStatus("تم تجهيز التقرير");
+        setStatus("Structured report is ready");
         onApply?.(data.result);
         return;
       }
@@ -164,7 +179,7 @@ export default function VoiceScribe({ onApply }: VoiceScribeProps) {
       if (data.status === "error") {
         clearPolling();
         setError(data.error || "Extraction failed.");
-        setStatus("فشل الاستخراج الطبي");
+        setStatus("Medical extraction failed");
         return;
       }
 
@@ -174,14 +189,14 @@ export default function VoiceScribe({ onApply }: VoiceScribeProps) {
     } catch (err) {
       clearPolling();
       setError(err instanceof Error ? err.message : "Polling failed.");
-      setStatus("فشل متابعة النتيجة");
+      setStatus("Failed to fetch extraction result");
     }
   };
 
   const submitExtraction = async (rawTranscript: string) => {
     const cleaned = rawTranscript.trim();
     if (!cleaned) {
-      throw new Error("ما طلع نص من التسجيل.");
+      throw new Error("No transcript was returned.");
     }
 
     setJobId("");
@@ -214,7 +229,7 @@ export default function VoiceScribe({ onApply }: VoiceScribeProps) {
       setResult(null);
       setJobId("");
       setJobStatus("");
-      setStatus("برفع التسجيل للتفريغ...");
+      setStatus("Uploading audio for transcription...");
       setDetectedLanguage("");
 
       const mimeType = blob.type || "audio/webm";
@@ -250,16 +265,16 @@ export default function VoiceScribe({ onApply }: VoiceScribeProps) {
       );
 
       if (!finalTranscript) {
-        throw new Error("ما طلع نص من الملف.");
+        throw new Error("No transcript was returned from the audio.");
       }
 
-      setStatus("جاري الاستخراج الطبي...");
+      setStatus("Generating structured medical draft...");
       await submitExtraction(finalTranscript);
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Unexpected transcription error.",
       );
-      setStatus("فشل التفريغ");
+      setStatus("Transcription failed");
     } finally {
       setIsTranscribing(false);
       setIsRecording(false);
@@ -274,11 +289,11 @@ export default function VoiceScribe({ onApply }: VoiceScribeProps) {
         typeof navigator === "undefined" ||
         !navigator.mediaDevices?.getUserMedia
       ) {
-        throw new Error("المتصفح ما بدعم تسجيل الصوت.");
+        throw new Error("This browser does not support audio recording.");
       }
 
       if (typeof MediaRecorder === "undefined") {
-        throw new Error("MediaRecorder مش مدعوم على هذا الجهاز.");
+        throw new Error("MediaRecorder is not supported on this device.");
       }
 
       clearPolling();
@@ -288,7 +303,7 @@ export default function VoiceScribe({ onApply }: VoiceScribeProps) {
       setDetectedLanguage("");
       setJobId("");
       setJobStatus("");
-      setStatus("بجهز المايك...");
+      setStatus("Preparing microphone...");
 
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -322,8 +337,8 @@ export default function VoiceScribe({ onApply }: VoiceScribeProps) {
           error?: { message?: string };
         };
 
-        setError(maybeEvent.error?.message || "فشل التسجيل.");
-        setStatus("فشل التسجيل");
+        setError(maybeEvent.error?.message || "Recording failed.");
+        setStatus("Recording failed");
         setIsRecording(false);
         setIsStopping(false);
         cleanupMedia();
@@ -334,8 +349,8 @@ export default function VoiceScribe({ onApply }: VoiceScribeProps) {
         const blob = new Blob(chunksRef.current, { type: finalMimeType });
 
         if (!blob.size) {
-          setError("التسجيل طلع فاضي.");
-          setStatus("ما طلع صوت");
+          setError("The recording is empty.");
+          setStatus("No audio captured");
           setIsRecording(false);
           setIsStopping(false);
           cleanupMedia();
@@ -352,12 +367,12 @@ export default function VoiceScribe({ onApply }: VoiceScribeProps) {
       recorder.start(500);
       setIsRecording(true);
       setIsStopping(false);
-      setStatus("جاري التسجيل...");
+      setStatus("Recording in progress...");
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Failed to start recording.",
       );
-      setStatus("فشل بدء التسجيل");
+      setStatus("Failed to start recording");
       cleanupMedia();
     }
   };
@@ -370,7 +385,7 @@ export default function VoiceScribe({ onApply }: VoiceScribeProps) {
     }
 
     setIsStopping(true);
-    setStatus("بوقف التسجيل وبجهز الملف...");
+    setStatus("Stopping recording and preparing file...");
     recorder.stop();
   };
 
@@ -393,7 +408,7 @@ export default function VoiceScribe({ onApply }: VoiceScribeProps) {
     setDetectedLanguage("");
     setJobId("");
     setJobStatus("");
-    setStatus("تم اختيار ملف صوت");
+    setStatus("Audio file selected");
 
     void transcribeBlob(file, file.name);
   };
@@ -413,87 +428,129 @@ export default function VoiceScribe({ onApply }: VoiceScribeProps) {
     jobStatus === "processing";
 
   return (
-    <div className="rounded-3xl border border-neutral-200 bg-white p-4 shadow-sm">
-      <div className="flex flex-wrap items-center gap-3">
-        <button
-          type="button"
-          onClick={() => void startRecording()}
-          disabled={busy}
-          className="rounded-2xl bg-black px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-        >
-          {isRecording ? "جاري التسجيل..." : "Start Recording"}
-        </button>
-
-        <button
-          type="button"
-          onClick={stopRecording}
-          disabled={!isRecording || isStopping}
-          className="rounded-2xl border border-neutral-300 px-4 py-2 text-sm font-medium disabled:opacity-50"
-        >
-          {isStopping ? "Stopping..." : "Stop"}
-        </button>
-
-        <button
-          type="button"
-          onClick={openFilePicker}
-          disabled={busy}
-          className="rounded-2xl border border-neutral-300 px-4 py-2 text-sm font-medium disabled:opacity-50"
-        >
-          Upload Audio
-        </button>
-
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="audio/*,video/*"
-          className="hidden"
-          onChange={handlePickedFile}
-        />
-      </div>
-
-      <div className="mt-4 space-y-2 text-sm text-neutral-700">
+    <section className="rounded-3xl border border-neutral-200 bg-white p-5 shadow-sm">
+      <div className="mb-5 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div>
-          <span className="font-semibold">Status:</span> {status}
+          <h2 className="text-lg font-semibold text-neutral-900">
+            AI Medical Scribe
+          </h2>
+          <p className="mt-1 text-sm text-neutral-600">
+            Record or upload a visit audio file, transcribe mixed Arabic and
+            English speech, then generate a structured medical draft.
+          </p>
         </div>
 
-        {!!detectedLanguage && (
-          <div>
-            <span className="font-semibold">Language:</span> {detectedLanguage}
-          </div>
-        )}
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => void startRecording()}
+            disabled={busy}
+            className="rounded-2xl bg-black px-4 py-2 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {isRecording ? "Recording..." : "Start Recording"}
+          </button>
 
-        {!!jobId && (
-          <div>
-            <span className="font-semibold">Job:</span> {jobStatus} ({jobId})
-          </div>
-        )}
+          <button
+            type="button"
+            onClick={stopRecording}
+            disabled={!isRecording || isStopping}
+            className="rounded-2xl border border-neutral-300 bg-white px-4 py-2 text-sm font-semibold text-neutral-800 transition hover:bg-neutral-50 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {isStopping ? "Stopping..." : "Stop"}
+          </button>
 
-        {!!error && (
-          <div className="rounded-2xl border border-red-200 bg-red-50 px-3 py-2 text-red-700">
-            {error}
-          </div>
-        )}
+          <button
+            type="button"
+            onClick={openFilePicker}
+            disabled={busy}
+            className="rounded-2xl border border-neutral-300 bg-white px-4 py-2 text-sm font-semibold text-neutral-800 transition hover:bg-neutral-50 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Upload Audio
+          </button>
+
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="audio/*,video/*"
+            className="hidden"
+            onChange={handlePickedFile}
+          />
+        </div>
       </div>
 
-      <div className="mt-4 grid gap-4 lg:grid-cols-2">
-        <div className="rounded-2xl border border-neutral-200 p-3">
-          <h3 className="mb-2 text-sm font-semibold text-neutral-900">
-            Transcript
-          </h3>
-          <pre className="whitespace-pre-wrap break-words text-sm text-neutral-700">
-            {transcript || "ابدئي تسجيل أو ارفعي ملف."}
-          </pre>
+      <div className="mb-5 grid gap-3 md:grid-cols-3">
+        <div className="rounded-2xl border border-neutral-200 bg-neutral-50 p-4">
+          <div className="text-xs font-medium uppercase tracking-wide text-neutral-500">
+            Status
+          </div>
+          <div className="mt-2 text-sm font-semibold text-neutral-900">
+            {status}
+          </div>
         </div>
 
-        <div className="rounded-2xl border border-neutral-200 p-3">
-          <h3 className="mb-2 text-sm font-semibold text-neutral-900">
-            Structured Draft
-          </h3>
-          <pre className="whitespace-pre-wrap break-words text-sm text-neutral-700">
-            {result ? JSON.stringify(result, null, 2) : "لسه ما في نتيجة."}
-          </pre>
+        <div className="rounded-2xl border border-neutral-200 bg-neutral-50 p-4">
+          <div className="text-xs font-medium uppercase tracking-wide text-neutral-500">
+            Detected Language
+          </div>
+          <div className="mt-2 text-sm font-semibold text-neutral-900">
+            {detectedLanguage || "Auto / Mixed"}
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-neutral-200 bg-neutral-50 p-4">
+          <div className="text-xs font-medium uppercase tracking-wide text-neutral-500">
+            Extraction Job
+          </div>
+          <div className="mt-2 text-sm font-semibold text-neutral-900">
+            {jobId ? `${formatJobStatus(jobStatus)} (${jobId})` : "Not started"}
+          </div>
         </div>
       </div>
-    </div>
+
+      {!!error && (
+        <div className="mb-5 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {error}
+        </div>
+      )}
+
+      <div className="grid gap-4 xl:grid-cols-2">
+        <div className="overflow-hidden rounded-3xl border border-neutral-200">
+          <div className="border-b border-neutral-200 bg-neutral-50 px-4 py-3">
+            <h3 className="text-sm font-semibold text-neutral-900">
+              Transcript
+            </h3>
+            <p className="mt-1 text-xs text-neutral-500">
+              Raw speech-to-text output from the uploaded or recorded audio.
+            </p>
+          </div>
+
+          <div className="min-h-[260px] bg-white p-4">
+            <pre className="whitespace-pre-wrap break-words text-sm leading-6 text-neutral-700">
+              {transcript ||
+                "No transcript yet. Start recording or upload an audio file."}
+            </pre>
+          </div>
+        </div>
+
+        <div className="overflow-hidden rounded-3xl border border-neutral-200">
+          <div className="border-b border-neutral-200 bg-neutral-50 px-4 py-3">
+            <h3 className="text-sm font-semibold text-neutral-900">
+              Structured Draft
+            </h3>
+            <p className="mt-1 text-xs text-neutral-500">
+              Extracted medical fields ready to be applied to the report form.
+            </p>
+          </div>
+
+          <div className="min-h-[260px] bg-white p-4">
+            <pre className="whitespace-pre-wrap break-words text-sm leading-6 text-neutral-700">
+              {result
+                ? JSON.stringify(result, null, 2)
+                : "No structured draft yet."}
+            </pre>
+          </div>
+        </div>
+      </div>
+    </section>
   );
 }

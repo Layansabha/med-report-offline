@@ -7,9 +7,19 @@ const GROQ_BASE_URL =
 const GROQ_TRANSCRIBE_URL = `${GROQ_BASE_URL}/audio/transcriptions`;
 const MAX_FREE_TIER_BYTES = 25 * 1024 * 1024;
 
-function tryParseJson(text: string) {
+type GroqTranscriptionResponse = {
+  text?: string;
+  language?: string;
+  duration?: number;
+  segments?: unknown[];
+  error?: {
+    message?: string;
+  };
+};
+
+function tryParseJson<T>(text: string): T | null {
   try {
-    return JSON.parse(text);
+    return JSON.parse(text) as T;
   } catch {
     return null;
   }
@@ -27,9 +37,6 @@ export async function POST(req: Request) {
 
     const incoming = await req.formData();
     const file = incoming.get("file");
-    const languageHintRaw = incoming.get("languageHint");
-    const languageHint =
-      typeof languageHintRaw === "string" ? languageHintRaw.trim() : "";
 
     if (!(file instanceof File)) {
       return NextResponse.json(
@@ -60,8 +67,10 @@ export async function POST(req: Request) {
     const prompt =
       process.env.GROQ_TRANSCRIBE_PROMPT ||
       [
-        "Medical dictation in mixed Arabic and English.",
-        "Preserve medication names, diagnoses, dosages, numbers, ages, and case details exactly as spoken.",
+        "Medical dictation with mixed Arabic and English speech.",
+        "Transcribe exactly what is said.",
+        "Preserve medication names, diagnoses, symptoms, numbers, ages, dosages, and abbreviations.",
+        "Do not translate unnecessarily.",
         "Do not invent words that are not in the audio.",
       ].join(" ");
 
@@ -73,9 +82,9 @@ export async function POST(req: Request) {
     groqForm.append("prompt", prompt);
     groqForm.append("timestamp_granularities[]", "segment");
 
-    if (languageHint) {
-      groqForm.append("language", languageHint);
-    }
+    // Important:
+    // We intentionally do NOT force "language" here,
+    // because the doctor may mix Arabic and English in the same recording.
 
     const groqRes = await fetch(GROQ_TRANSCRIBE_URL, {
       method: "POST",
@@ -86,16 +95,12 @@ export async function POST(req: Request) {
     });
 
     const rawText = await groqRes.text();
-    const parsed = tryParseJson(rawText);
+    const parsed = tryParseJson<GroqTranscriptionResponse>(rawText);
 
     if (!groqRes.ok) {
       return NextResponse.json(
         {
-          error:
-            parsed?.error?.message ||
-            parsed?.error ||
-            rawText ||
-            "Transcription failed.",
+          error: parsed?.error?.message || rawText || "Transcription failed.",
         },
         { status: groqRes.status },
       );
