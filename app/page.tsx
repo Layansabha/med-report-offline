@@ -123,8 +123,6 @@ export default function Page() {
   const [notes, setNotes] = useState("");
 
   const [systems, setSystems] = useState<SystemTemplate[]>([]);
-  const [systemsLoaded, setSystemsLoaded] = useState(false);
-
   const [customColumns, setCustomColumns] = useState<CustomColumn[]>([]);
   const [newColTitle, setNewColTitle] = useState("");
 
@@ -139,6 +137,11 @@ export default function Page() {
   const [dense, setDense] = useState(false);
 
   const [online, setOnline] = useState(true);
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">(
+    "idle",
+  );
+  const [confirmResetOpen, setConfirmResetOpen] = useState(false);
+  const [scribeResetSignal, setScribeResetSignal] = useState(0);
 
   const [toast, setToast] = useState<ToastState>(null);
   const toastTimer = useRef<number | null>(null);
@@ -172,8 +175,7 @@ export default function Page() {
   useEffect(() => {
     fetch("/systems.json")
       .then((r) => r.json())
-      .then((data) => setSystems(Array.isArray(data) ? data : []))
-      .finally(() => setSystemsLoaded(true));
+      .then((data) => setSystems(Array.isArray(data) ? data : []));
   }, []);
 
   /* ===================== Online/offline ===================== */
@@ -213,43 +215,33 @@ export default function Page() {
 
       const parsed = JSON.parse(raw);
 
-      setTab(parsed.tab ?? "meds");
-
       setPatientName(parsed.patientName ?? "");
       setDob(parsed.dob ?? "");
       setMrn(parsed.mrn ?? "");
       setAllergies(parsed.allergies ?? "");
       setIntolerances(parsed.intolerances ?? "");
       setCarer(parsed.carer ?? "");
-
       setSignificantHistory(parsed.significantHistory ?? "");
-
       setReviewDate(parsed.reviewDate ?? todayISO());
       setReviewCompletedBy(parsed.reviewCompletedBy ?? "");
       setTreatmentGoals(parsed.treatmentGoals ?? "");
-
       setNextReviewDate(parsed.nextReviewDate ?? "");
       setNextReviewMode(parsed.nextReviewMode ?? "");
       setBeforeNextReview(parsed.beforeNextReview ?? "");
-
       setNotes(parsed.notes ?? "");
-
       setCustomColumns(
         Array.isArray(parsed.customColumns) ? parsed.customColumns : [],
       );
       setSections(Array.isArray(parsed.sections) ? parsed.sections : []);
-
+      setShowMore(Boolean(parsed.showMore));
       setInputMode(parsed.inputMode ?? "smart");
-      setDense(!!parsed.dense);
-      setSearch(parsed.search ?? "");
-      setIncompleteOnly(!!parsed.incompleteOnly);
+      setDense(Boolean(parsed.dense));
     } catch {}
   }, []);
 
-  /* ===================== Autosave persist ===================== */
+  /* ===================== Autosave save ===================== */
   useEffect(() => {
     const payload = {
-      tab,
       patientName,
       dob,
       mrn,
@@ -266,21 +258,23 @@ export default function Page() {
       notes,
       customColumns,
       sections,
+      showMore,
       inputMode,
       dense,
-      search,
-      incompleteOnly,
     };
 
+    setSaveState("saving");
     const t = window.setTimeout(() => {
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-      } catch {}
-    }, 550);
+        setSaveState("saved");
+      } catch {
+        setSaveState("idle");
+      }
+    }, 350);
 
     return () => window.clearTimeout(t);
   }, [
-    tab,
     patientName,
     dob,
     mrn,
@@ -297,115 +291,132 @@ export default function Page() {
     notes,
     customColumns,
     sections,
+    showMore,
     inputMode,
     dense,
-    search,
-    incompleteOnly,
   ]);
 
-  /* ===================== Index systems ===================== */
-  const systemById = useMemo(() => {
-    const map = new Map<string, SystemTemplate>();
-    for (const s of systems) map.set(s.id, s);
-    return map;
-  }, [systems]);
-
-  /* ===================== Ensure extra keys ===================== */
-  function ensureExtraKeys(row: MedicationRow): MedicationRow {
-    const next: Record<string, string> = {};
-    for (const c of customColumns) next[c.id] = row.extra?.[c.id] ?? "";
-    return { ...row, extra: next };
-  }
+  /* ===================== Persist recents/favs ===================== */
+  useEffect(() => {
+    try {
+      localStorage.setItem(RECENTS_KEY, JSON.stringify(recents));
+    } catch {}
+  }, [recents]);
 
   useEffect(() => {
-    setSections((prev) =>
-      prev.map((sec) => ({
-        ...sec,
-        rows: sec.rows.map((r) => ensureExtraKeys(r)),
-      })),
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [customColumns]);
+    try {
+      localStorage.setItem(FAVS_KEY, JSON.stringify(favs));
+    } catch {}
+  }, [favs]);
 
   /* ===================== Toast ===================== */
-  function showToast(next: ToastState, ms = 5500) {
-    setToast(next);
+  function showToast(next: ToastState) {
     if (toastTimer.current) window.clearTimeout(toastTimer.current);
-    toastTimer.current = window.setTimeout(() => setToast(null), ms);
+    setToast(next);
+    toastTimer.current = window.setTimeout(() => setToast(null), 2800);
   }
 
-  /* ===================== Core actions ===================== */
-  function resetAll() {
-    setTab("meds");
+  /* ===================== Computed ===================== */
+  const systemById = useMemo(() => {
+    const m = new Map<string, SystemTemplate>();
+    systems.forEach((s) => m.set(s.id, s));
+    return m;
+  }, [systems]);
 
-    setPatientName("");
-    setDob("");
-    setMrn("");
-    setAllergies("");
-    setIntolerances("");
-    setCarer("");
+  const totalRows = useMemo(
+    () => sections.reduce((acc, s) => acc + s.rows.length, 0),
+    [sections],
+  );
 
-    setSignificantHistory("");
+  const requiredMissing = useMemo(() => {
+    let missing = 0;
+    if (!patientName.trim()) missing += 1;
+    if (!reviewDate.trim()) missing += 1;
+    if (!reviewCompletedBy.trim()) missing += 1;
+    if (!sections.length) missing += 1;
+    return missing;
+  }, [patientName, reviewDate, reviewCompletedBy, sections]);
 
-    setReviewDate(todayISO());
-    setReviewCompletedBy("");
-    setTreatmentGoals("");
+  const readyToPrint = requiredMissing === 0;
 
-    setNextReviewDate("");
-    setNextReviewMode("");
-    setBeforeNextReview("");
+  const filteredSections = useMemo(() => {
+    const q = normalize(search);
 
-    setNotes("");
+    return sections
+      .map((sec) => {
+        const rows = sec.rows.filter((r) => {
+          const matchSearch =
+            !q ||
+            [
+              systemById.get(sec.systemId)?.name ?? "",
+              sec.diagnosis,
+              r.medication,
+              r.dose,
+              r.how,
+              r.purpose,
+              r.plan,
+              ...Object.values(r.extra ?? {}),
+            ]
+              .join(" \n ")
+              .toLowerCase()
+              .includes(q);
 
-    setCustomColumns([]);
-    setNewColTitle("");
-    setSections([]);
-    setAddSystemId("");
+          const missingCritical =
+            !r.medication.trim() ||
+            !r.dose.trim() ||
+            !r.how.trim() ||
+            !r.plan.trim();
 
-    setSearch("");
-    setIncompleteOnly(false);
-    setShowMore(false);
-    setInputMode("smart");
-    setDense(false);
+          return matchSearch && (!incompleteOnly || missingCritical);
+        });
 
-    try {
-      localStorage.removeItem(STORAGE_KEY);
-    } catch {}
+        if (!q && !incompleteOnly) return sec;
+        return { ...sec, rows };
+      })
+      .filter((sec) => {
+        const systemName = systemById.get(sec.systemId)?.name ?? "";
+        const secMatch =
+          !search.trim() ||
+          `${systemName} ${sec.diagnosis}`
+            .toLowerCase()
+            .includes(search.toLowerCase());
+
+        return secMatch || sec.rows.length > 0;
+      });
+  }, [sections, search, incompleteOnly, systemById]);
+
+  /* ===================== Helpers ===================== */
+  function addRecent(systemId: string, med: string) {
+    const v = med.trim();
+    if (!systemId || !v) return;
+
+    setRecents((prev) => {
+      const list = uniqKeepOrder([v, ...(prev[systemId] ?? [])]).slice(0, 8);
+      return { ...prev, [systemId]: list };
+    });
   }
 
-  function printPdf() {
-    const name = patientName.trim() || "Patient";
-    document.title = `Medication Report - ${name}`;
-    window.print();
+  function toggleFav(systemId: string, med: string) {
+    const v = med.trim();
+    if (!systemId || !v) return;
+
+    setFavs((prev) => {
+      const list = prev[systemId] ?? [];
+      const has = list.some((x) => normalize(x) === normalize(v));
+      return {
+        ...prev,
+        [systemId]: has
+          ? list.filter((x) => normalize(x) !== normalize(v))
+          : uniqKeepOrder([v, ...list]).slice(0, 20),
+      };
+    });
   }
 
-  function addColumn() {
-    const title = newColTitle.trim();
-    if (!title) return;
-
-    const col: CustomColumn = { id: `col-${uid()}`, title };
-    setCustomColumns((prev) => [...prev, col]);
-    setNewColTitle("");
-  }
-
-  function removeColumn(colId: string) {
-    setCustomColumns((prev) => prev.filter((c) => c.id !== colId));
-
-    setSections((prev) =>
-      prev.map((sec) => ({
-        ...sec,
-        rows: sec.rows.map((r) => {
-          const next = { ...(r.extra ?? {}) };
-          delete next[colId];
-          return { ...r, extra: next };
-        }),
-      })),
-    );
-  }
-
-  function createEmptyRow(): MedicationRow {
+  function makeBlankRow(): MedicationRow {
     const extra: Record<string, string> = {};
-    for (const c of customColumns) extra[c.id] = "";
+    customColumns.forEach((c) => {
+      extra[c.id] = "";
+    });
 
     return {
       id: `med-${uid()}`,
@@ -418,105 +429,175 @@ export default function Page() {
     };
   }
 
-  function addSectionForSystem(systemId: string) {
+  function addSystemSection(systemId: string) {
+    if (!systemId) return;
+
     const sys = systemById.get(systemId);
     if (!sys) return;
 
-    const sec: SystemSection = {
-      id: `sec-${uid()}`,
-      systemId: sys.id,
-      diagnosis: sys.diagnosis ?? "",
-      diagnosisDate: sys.diagnosis_date ?? "",
-      rows: [],
-    };
+    setSections((prev) => [
+      ...prev,
+      {
+        id: `sec-${uid()}`,
+        systemId,
+        diagnosis: sys.diagnosis ?? "",
+        diagnosisDate: sys.diagnosis_date ?? "",
+        rows: [],
+      },
+    ]);
 
-    setSections((prev) => [...prev, sec]);
+    setAddSystemId("");
     setTab("meds");
   }
 
-  function removeSection(sectionId: string) {
-    setSections((prev) => {
-      const idx = prev.findIndex((s) => s.id === sectionId);
-      if (idx === -1) return prev;
-
-      const removed = prev[idx];
-      const next = prev.filter((s) => s.id !== sectionId);
-
-      showToast({
-        message: "System removed.",
-        undoLabel: "Undo",
-        onUndo: () =>
-          setSections((p) => {
-            const copy = [...p];
-            copy.splice(idx, 0, removed);
-            return copy;
-          }),
-      });
-
-      return next;
+  function removeSystemSection(sectionId: string) {
+    const snapshot = sections;
+    setSections((prev) => prev.filter((s) => s.id !== sectionId));
+    showToast({
+      message: "System removed",
+      undoLabel: "Undo",
+      onUndo: () => setSections(snapshot),
     });
   }
 
-  function updateSection(sectionId: string, patch: Partial<SystemSection>) {
+  function addCustomColumn() {
+    const title = newColTitle.trim();
+    if (!title) return;
+
+    const col: CustomColumn = { id: `col-${uid()}`, title };
+    setCustomColumns((prev) => [...prev, col]);
     setSections((prev) =>
-      prev.map((s) => (s.id === sectionId ? { ...s, ...patch } : s)),
+      prev.map((sec) => ({
+        ...sec,
+        rows: sec.rows.map((r) => ({
+          ...r,
+          extra: { ...r.extra, [col.id]: "" },
+        })),
+      })),
     );
+    setNewColTitle("");
   }
 
-  function addTemplateRows(sectionId: string) {
+  function removeCustomColumn(colId: string) {
+    const snapshotCols = customColumns;
+    const snapshotSections = sections;
+
+    setCustomColumns((prev) => prev.filter((c) => c.id !== colId));
+    setSections((prev) =>
+      prev.map((sec) => ({
+        ...sec,
+        rows: sec.rows.map((r) => {
+          const nextExtra = { ...r.extra };
+          delete nextExtra[colId];
+          return { ...r, extra: nextExtra };
+        }),
+      })),
+    );
+
+    showToast({
+      message: "Custom column removed",
+      undoLabel: "Undo",
+      onUndo: () => {
+        setCustomColumns(snapshotCols);
+        setSections(snapshotSections);
+      },
+    });
+  }
+
+  function openAddRow(sectionId: string) {
     const sec = sections.find((s) => s.id === sectionId);
     if (!sec) return;
 
-    const sys = systemById.get(sec.systemId);
-    if (!sys) return;
-
-    const toAdd: MedicationRow[] = sys.row_templates.map((_, idx) => ({
-      ...createEmptyRow(),
-      id: `tpl-${sec.systemId}-${idx}-${uid()}`,
-      templateIndex: idx,
-    }));
-
-    setSections((prev) =>
-      prev.map((s) =>
-        s.id === sectionId ? { ...s, rows: [...s.rows, ...toAdd] } : s,
-      ),
-    );
+    const blank = makeBlankRow();
+    setEditorOpen(true);
+    setEditorSectionId(sectionId);
+    setEditorRowId(null);
+    setEditorTemplateIndex(undefined);
+    setEditorDraft(blank);
   }
 
-  function deleteRow(sectionId: string, rowId: string) {
-    setSections((prev) => {
-      const secIdx = prev.findIndex((s) => s.id === sectionId);
-      if (secIdx === -1) return prev;
+  function openEditRow(sectionId: string, rowId: string) {
+    const sec = sections.find((s) => s.id === sectionId);
+    const row = sec?.rows.find((r) => r.id === rowId);
+    if (!sec || !row) return;
 
-      const sec = prev[secIdx];
-      const rowIdx = sec.rows.findIndex((r) => r.id === rowId);
-      if (rowIdx === -1) return prev;
+    setEditorOpen(true);
+    setEditorSectionId(sectionId);
+    setEditorRowId(rowId);
+    setEditorTemplateIndex(row.templateIndex);
+    setEditorDraft({
+      ...row,
+      extra: { ...row.extra },
+    });
+  }
 
-      const removed = sec.rows[rowIdx];
+  function closeEditor() {
+    setEditorOpen(false);
+    setEditorSectionId("");
+    setEditorRowId(null);
+    setEditorTemplateIndex(undefined);
+    setEditorDraft(makeBlankRow());
+  }
 
-      const nextSections = [...prev];
-      const nextSec: SystemSection = {
-        ...sec,
-        rows: sec.rows.filter((r) => r.id !== rowId),
-      };
-      nextSections[secIdx] = nextSec;
+  function saveEditor() {
+    if (!editorSectionId) return;
 
-      showToast({
-        message: "Medication deleted.",
-        undoLabel: "Undo",
-        onUndo: () =>
-          setSections((p) => {
-            const copy = [...p];
-            const s = copy[secIdx];
-            if (!s) return p;
-            const rowsCopy = [...s.rows];
-            rowsCopy.splice(rowIdx, 0, removed);
-            copy[secIdx] = { ...s, rows: rowsCopy };
-            return copy;
-          }),
-      });
+    const draft = {
+      ...editorDraft,
+      medication: editorDraft.medication.trim(),
+      dose: editorDraft.dose.trim(),
+      how: editorDraft.how.trim(),
+      purpose: editorDraft.purpose.trim(),
+      plan: editorDraft.plan.trim(),
+      extra: Object.fromEntries(
+        Object.entries(editorDraft.extra ?? {}).map(([k, v]) => [
+          k,
+          (v ?? "").trim(),
+        ]),
+      ),
+    };
 
-      return nextSections;
+    setSections((prev) =>
+      prev.map((sec) => {
+        if (sec.id !== editorSectionId) return sec;
+
+        if (editorRowId) {
+          return {
+            ...sec,
+            rows: sec.rows.map((r) => (r.id === editorRowId ? draft : r)),
+          };
+        }
+
+        return {
+          ...sec,
+          rows: [...sec.rows, { ...draft, id: `med-${uid()}` }],
+        };
+      }),
+    );
+
+    const sec = sections.find((s) => s.id === editorSectionId);
+    if (sec && draft.medication) addRecent(sec.systemId, draft.medication);
+
+    showToast({
+      message: editorRowId ? "Medication updated" : "Medication added",
+    });
+    closeEditor();
+  }
+
+  function removeRow(sectionId: string, rowId: string) {
+    const snapshot = sections;
+    setSections((prev) =>
+      prev.map((sec) =>
+        sec.id !== sectionId
+          ? sec
+          : { ...sec, rows: sec.rows.filter((r) => r.id !== rowId) },
+      ),
+    );
+
+    showToast({
+      message: "Medication removed",
+      undoLabel: "Undo",
+      onUndo: () => setSections(snapshot),
     });
   }
 
@@ -524,20 +605,90 @@ export default function Page() {
     setSections((prev) =>
       prev.map((sec) => {
         if (sec.id !== sectionId) return sec;
-
-        const r = sec.rows.find((x) => x.id === rowId);
-        if (!r) return sec;
-
-        const copy: MedicationRow = {
-          ...r,
-          id: `dup-${uid()}`,
-          templateIndex: undefined,
-          extra: { ...(r.extra ?? {}) },
+        const row = sec.rows.find((r) => r.id === rowId);
+        if (!row) return sec;
+        return {
+          ...sec,
+          rows: [
+            ...sec.rows,
+            {
+              ...row,
+              id: `med-${uid()}`,
+              extra: { ...row.extra },
+            },
+          ],
         };
-
-        return { ...sec, rows: [...sec.rows, copy] };
       }),
     );
+
+    showToast({ message: "Medication duplicated" });
+  }
+
+  function moveRow(sectionId: string, rowId: string, dir: -1 | 1) {
+    setSections((prev) =>
+      prev.map((sec) => {
+        if (sec.id !== sectionId) return sec;
+        const idx = sec.rows.findIndex((r) => r.id === rowId);
+        if (idx === -1) return sec;
+        const nextIdx = idx + dir;
+        if (nextIdx < 0 || nextIdx >= sec.rows.length) return sec;
+        const nextRows = [...sec.rows];
+        const [item] = nextRows.splice(idx, 1);
+        nextRows.splice(nextIdx, 0, item);
+        return { ...sec, rows: nextRows };
+      }),
+    );
+  }
+
+  function applyTemplateToEditor(sectionId: string, templateIndex: number) {
+    const sec = sections.find((s) => s.id === sectionId);
+    const sys = sec ? systemById.get(sec.systemId) : null;
+    const template = sys?.row_templates?.[templateIndex];
+    if (!template) return;
+
+    setEditorTemplateIndex(templateIndex);
+    setEditorDraft((prev) => ({
+      ...prev,
+      medication: prev.medication || template.medication_options?.[0] || "",
+      dose: prev.dose || template.dose_options?.[0] || "",
+      how: prev.how || template.how_options?.[0] || "",
+      purpose: prev.purpose || template.purpose_options?.[0] || "",
+      plan: prev.plan || template.plan_options?.[0] || "",
+      templateIndex,
+    }));
+  }
+
+  function clearAll() {
+    setPatientName("");
+    setDob("");
+    setMrn("");
+    setAllergies("");
+    setIntolerances("");
+    setCarer("");
+    setSignificantHistory("");
+    setReviewDate(todayISO());
+    setReviewCompletedBy("");
+    setTreatmentGoals("");
+    setNextReviewDate("");
+    setNextReviewMode("");
+    setBeforeNextReview("");
+    setNotes("");
+    setCustomColumns([]);
+    setSections([]);
+    setAddSystemId("");
+    setSearch("");
+    setIncompleteOnly(false);
+    setShowMore(false);
+    setInputMode("smart");
+    setDense(false);
+    setConfirmResetOpen(false);
+    setScribeResetSignal((prev) => prev + 1);
+
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch {}
+
+    showToast({ message: "Draft cleared" });
   }
 
   function applyScribeDraft(draft: ScribeDraft) {
@@ -666,1405 +817,1470 @@ export default function Page() {
     setTab("meds");
   }
 
-  /* ===================== Recents / Favorites ===================== */
-  function persistRecents(next: MapList) {
-    setRecents(next);
-    try {
-      localStorage.setItem(RECENTS_KEY, JSON.stringify(next));
-    } catch {}
-  }
-
-  function persistFavs(next: MapList) {
-    setFavs(next);
-    try {
-      localStorage.setItem(FAVS_KEY, JSON.stringify(next));
-    } catch {}
-  }
-
-  function addRecent(systemId: string, medicationName: string) {
-    const v = medicationName.trim();
-    if (!v) return;
-
-    const current = recents[systemId] ?? [];
-    const next = {
-      ...recents,
-      [systemId]: uniqKeepOrder([v, ...current]).slice(0, 12),
-    };
-
-    persistRecents(next);
-  }
-
-  function toggleFavorite(systemId: string, medicationName: string) {
-    const v = medicationName.trim();
-    if (!v) return;
-
-    const current = favs[systemId] ?? [];
-    const exists = current.some((x) => x.toLowerCase() === v.toLowerCase());
-
-    const nextList = exists
-      ? current.filter((x) => x.toLowerCase() !== v.toLowerCase())
-      : uniqKeepOrder([v, ...current]).slice(0, 20);
-
-    const next = { ...favs, [systemId]: nextList };
-    persistFavs(next);
-  }
-
-  function isFavorite(systemId: string, medicationName: string) {
-    const v = medicationName.trim().toLowerCase();
-    if (!v) return false;
-    return (favs[systemId] ?? []).some((x) => x.toLowerCase() === v);
-  }
-
-  /* ===================== Options per system/template ===================== */
-  function getOptions(systemId: string, templateIndex?: number): RowTemplate {
-    const empty: RowTemplate = {
-      medication_options: [],
-      dose_options: [],
-      how_options: [],
-      purpose_options: [],
-      plan_options: [],
-    };
-
-    const sys = systemById.get(systemId);
-    if (!sys) return empty;
-
-    if (typeof templateIndex === "number") {
-      return sys.row_templates[templateIndex] ?? empty;
-    }
-
-    const merged: RowTemplate = {
-      medication_options: [],
-      dose_options: [],
-      how_options: [],
-      purpose_options: [],
-      plan_options: [],
-    };
-
-    for (const t of sys.row_templates) {
-      merged.medication_options.push(...t.medication_options);
-      merged.dose_options.push(...t.dose_options);
-      merged.how_options.push(...t.how_options);
-      merged.purpose_options.push(...t.purpose_options);
-      merged.plan_options.push(...t.plan_options);
-    }
-
-    merged.medication_options = Array.from(new Set(merged.medication_options));
-    merged.dose_options = Array.from(new Set(merged.dose_options));
-    merged.how_options = Array.from(new Set(merged.how_options));
-    merged.purpose_options = Array.from(new Set(merged.purpose_options));
-    merged.plan_options = Array.from(new Set(merged.plan_options));
-
-    return merged;
-  }
-
-  /* ===================== Suggestions for custom columns ===================== */
-  const customColumnSuggestions = useMemo(() => {
-    const map: Record<string, string[]> = {};
-    for (const c of customColumns) map[c.id] = [];
-
-    for (const sec of sections) {
-      for (const r of sec.rows) {
-        for (const c of customColumns) {
-          const v = (r.extra?.[c.id] ?? "").trim();
-          if (v) map[c.id].push(v);
-        }
-      }
-    }
-
-    for (const c of customColumns) {
-      map[c.id] = Array.from(new Set(map[c.id])).slice(0, 50);
-    }
-
-    return map;
-  }, [sections, customColumns]);
-
-  /* ===================== Completion status ===================== */
-  function rowIncomplete(r: MedicationRow) {
-    return (
-      !r.medication.trim() ||
-      !r.dose.trim() ||
-      !r.how.trim() ||
-      !r.purpose.trim() ||
-      !r.plan.trim()
-    );
-  }
-
-  const overall = useMemo(() => {
-    let total = 0;
-    let incomplete = 0;
-
-    for (const sec of sections) {
-      for (const r of sec.rows) {
-        total++;
-        if (rowIncomplete(r)) incomplete++;
-      }
-    }
-
-    const ready = total > 0 && incomplete === 0;
-    return { total, incomplete, ready };
-  }, [sections]);
-
-  /* ===================== Filtering ===================== */
-  const filteredSections = useMemo(() => {
-    const q = normalize(search);
-
-    return sections
-      .map((sec) => {
-        const sysName = systemById.get(sec.systemId)?.name ?? "";
-
-        const rows = sec.rows.filter((r) => {
-          const hay = normalize(
-            [
-              sysName,
-              sec.diagnosis,
-              sec.diagnosisDate,
-              r.medication,
-              r.dose,
-              r.how,
-              r.purpose,
-              r.plan,
-              ...customColumns.map((c) => r.extra?.[c.id] ?? ""),
-            ].join(" "),
-          );
-
-          const matches = q ? hay.includes(q) : true;
-          const okIncomplete = !incompleteOnly || rowIncomplete(r);
-
-          return matches && okIncomplete;
-        });
-
-        return { sec, rows };
-      })
-      .filter(({ rows }) => (q ? rows.length > 0 : true));
-  }, [sections, search, incompleteOnly, systemById, customColumns]);
-
-  const printEnabled = overall.total > 0;
-
-  /* ===================== Editor Open/Close/Save ===================== */
-
-  function openCreateMedication(sectionId: string, templateIndex?: number) {
-    const base = createEmptyRow();
-    base.templateIndex = templateIndex;
-
-    setEditorSectionId(sectionId);
-    setEditorRowId(null);
-    setEditorTemplateIndex(templateIndex);
-    setEditorDraft(base);
-    setEditorOpen(true);
-
-    setTimeout(() => refMed.current?.focus(), 20);
-  }
-
-  function openEditMedication(sectionId: string, row: MedicationRow) {
-    setEditorSectionId(sectionId);
-    setEditorRowId(row.id);
-    setEditorTemplateIndex(row.templateIndex);
-    setEditorDraft({ ...ensureExtraKeys(row) });
-    setEditorOpen(true);
-
-    setTimeout(() => refMed.current?.focus(), 20);
-  }
-
-  function closeEditor() {
-    setEditorOpen(false);
-    setEditorRowId(null);
-    setEditorSectionId("");
-    setEditorTemplateIndex(undefined);
-    setEditorDraft(createEmptyRow());
-  }
-
-  function saveEditorCore(): { systemId: string; medication: string } | null {
-    const secId = editorSectionId;
-    if (!secId) return null;
-
-    const sec = sections.find((s) => s.id === secId);
-    const systemId = sec?.systemId ?? "";
-
-    const cleaned: MedicationRow = ensureExtraKeys({
-      ...editorDraft,
-      templateIndex: editorTemplateIndex,
-    });
-
-    setSections((prev) =>
-      prev.map((sec2) => {
-        if (sec2.id !== secId) return sec2;
-
-        if (editorRowId) {
-          return {
-            ...sec2,
-            rows: sec2.rows.map((r) =>
-              r.id === editorRowId ? { ...cleaned, id: editorRowId } : r,
-            ),
-          };
-        }
-
-        return {
-          ...sec2,
-          rows: [...sec2.rows, { ...cleaned, id: `med-${uid()}` }],
-        };
-      }),
-    );
-
-    if (systemId) addRecent(systemId, cleaned.medication);
-
-    return { systemId, medication: cleaned.medication };
-  }
-
-  function saveEditor() {
-    saveEditorCore();
-    closeEditor();
-  }
-
-  function saveAndAddAnother() {
-    const res = saveEditorCore();
-    if (!res) return;
-
-    setEditorRowId(null);
-    setEditorTemplateIndex(undefined);
-
-    const base = createEmptyRow();
-    setEditorDraft(base);
-
-    setTimeout(() => refMed.current?.focus(), 20);
-  }
+  /* ===================== Styles ===================== */
+  useEffect(() => {
+    const root = document.documentElement;
+    root.style.setProperty("--bg", "246 248 252");
+    root.style.setProperty("--surface", "255 255 255");
+    root.style.setProperty("--card", "251 252 254");
+    root.style.setProperty("--text", "15 23 42");
+    root.style.setProperty("--muted", "100 116 139");
+    root.style.setProperty("--border", "226 232 240");
+    root.style.setProperty("--primary", "37 99 235");
+    root.style.setProperty("--primary-soft", "219 234 254");
+    root.style.setProperty("--success", "5 150 105");
+    root.style.setProperty("--warn", "217 119 6");
+    root.style.setProperty("--danger", "220 38 38");
+  }, []);
 
   return (
-    <div className="min-h-screen">
-      <style>{`
-        @media print {
-          .no-print { display: none !important; }
-          .print-only { display: block !important; }
-          .print-card { box-shadow: none !important; border: none !important; background: #ffffff !important; }
-          body { background: #ffffff !important; }
-          .avoid-break { break-inside: avoid; page-break-inside: avoid; }
-        }
-      `}</style>
-
-      <div className="no-print sticky top-0 z-40 border-b border-[rgb(var(--border))] bg-[rgba(var(--surface),0.88)] backdrop-blur">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--primary))] font-bold text-white">
-              MR
-            </div>
-
-            <div className="leading-tight">
-              <div className="text-lg font-semibold">Medication Report</div>
-
-              <div className="flex flex-wrap items-center gap-2 text-xs text-[rgb(var(--muted))]">
-                <span>
-                  {systemsLoaded
-                    ? `Systems: ${systems.length}`
-                    : "Loading systems..."}
-                </span>
-
-                <span
-                  className={[
-                    "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold",
-                    online
-                      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                      : "border-rose-200 bg-rose-50 text-rose-700",
-                  ].join(" ")}
-                >
-                  <span className="h-1.5 w-1.5 rounded-full bg-current" />
-                  {online ? "Online" : "Offline"}
-                </span>
-
-                <span
-                  className={[
-                    "inline-flex items-center gap-2 rounded-full border px-2 py-0.5 text-[11px] font-semibold",
-                    overall.ready
-                      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                      : overall.total === 0
-                        ? "border-slate-200 bg-slate-50 text-slate-600"
-                        : "border-amber-200 bg-amber-50 text-amber-800",
-                  ].join(" ")}
-                  title="Completion status"
-                >
-                  {overall.total === 0
-                    ? "No meds"
-                    : overall.ready
-                      ? "Ready to print"
-                      : `${overall.incomplete} incomplete`}
-                </span>
-
-                <span className="hidden sm:inline text-[rgb(var(--muted))]">
-                  Auto-saved
-                </span>
-              </div>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              onClick={printPdf}
-              disabled={!printEnabled}
-              className="rounded-xl bg-[rgb(var(--primary))] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
-              title={
-                !printEnabled ? "Add medications first" : "Print / Save PDF"
-              }
-            >
-              Print
-            </button>
-
-            <button
-              onClick={() => setShowMore((p) => !p)}
-              className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-2 text-sm font-semibold"
-            >
-              More
-            </button>
-
-            <button
-              onClick={resetAll}
-              className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-2 text-sm font-semibold"
-              title="Clear everything"
-            >
-              Reset
-            </button>
-          </div>
-        </div>
-
-        <div className="border-t border-[rgb(var(--border))] bg-[rgb(var(--surface))]">
-          <div className="mx-auto flex max-w-6xl items-center gap-2 px-4 py-2">
-            <TabButton active={tab === "meds"} onClick={() => setTab("meds")}>
-              Medications
-            </TabButton>
-
-            <TabButton
-              active={tab === "patient"}
-              onClick={() => setTab("patient")}
-            >
-              Patient
-            </TabButton>
-
-            <TabButton
-              active={tab === "review"}
-              onClick={() => setTab("review")}
-            >
-              Review & Notes
-            </TabButton>
-
-            <div className="ml-auto flex items-center gap-2">
-              <input
-                className="w-48 rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--card))] px-3 py-2 text-sm sm:w-72"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search meds / system / plan..."
-              />
-            </div>
-          </div>
-        </div>
-
-        {showMore && (
-          <div className="border-t border-[rgb(var(--border))] bg-[rgb(var(--surface))]">
-            <div className="mx-auto flex max-w-6xl flex-col gap-3 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+    <div className="min-h-screen bg-[rgb(var(--bg))] text-[rgb(var(--text))]">
+      <main className="mx-auto flex w-full max-w-[1680px] flex-col gap-6 px-4 py-5 md:px-6 xl:px-8">
+        <section className="overflow-hidden rounded-[28px] border border-[rgb(var(--border))] bg-[rgb(var(--surface))] shadow-sm">
+          <div className="flex flex-col gap-5 px-5 py-5 lg:flex-row lg:items-start lg:justify-between lg:px-7 lg:py-6">
+            <div className="space-y-3">
               <div className="flex flex-wrap items-center gap-2">
-                <Segmented
-                  value={inputMode}
-                  onChange={setInputMode}
-                  options={[
-                    { value: "smart", label: "Smart" },
-                    { value: "pick", label: "Pick" },
-                    { value: "type", label: "Type" },
-                  ]}
-                />
+                <span className="inline-flex items-center rounded-full border border-[rgb(var(--border))] bg-[rgba(var(--card),0.8)] px-3 py-1 text-xs font-semibold text-[rgb(var(--muted))]">
+                  Intelligent Medication Report
+                </span>
 
-                <Toggle checked={dense} onChange={setDense} label="Compact" />
+                <span
+                  className={[
+                    "inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold",
+                    readyToPrint
+                      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                      : "border-amber-200 bg-amber-50 text-amber-700",
+                  ].join(" ")}
+                >
+                  {readyToPrint
+                    ? "Ready to print"
+                    : `${requiredMissing} item${requiredMissing > 1 ? "s" : ""} missing`}
+                </span>
 
-                <Toggle
-                  checked={incompleteOnly}
-                  onChange={setIncompleteOnly}
-                  label="Incomplete only"
-                />
+                <span
+                  className={[
+                    "inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold",
+                    saveState === "saved"
+                      ? "border-sky-200 bg-sky-50 text-sky-700"
+                      : saveState === "saving"
+                        ? "border-amber-200 bg-amber-50 text-amber-700"
+                        : "border-slate-200 bg-slate-50 text-slate-600",
+                  ].join(" ")}
+                >
+                  {saveState === "saving"
+                    ? "Saving..."
+                    : saveState === "saved"
+                      ? "Saved"
+                      : "Draft"}
+                </span>
+
+                {!online && (
+                  <span className="inline-flex items-center rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-xs font-semibold text-rose-700">
+                    Offline
+                  </span>
+                )}
               </div>
 
-              <div className="text-xs text-[rgb(var(--muted))]">
-                Tip: In editor: <b>Enter</b> moves forward, <b>Ctrl+Enter</b>{" "}
-                saves, <b>Esc</b> closes.
+              <div>
+                <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">
+                  Clinical Medication Review
+                </h1>
+                <p className="mt-2 max-w-3xl text-sm leading-6 text-[rgb(var(--muted))]">
+                  Capture patient details, build medication sections, and
+                  prepare a clean printable review without exposing technical
+                  processing to the clinician.
+                </p>
               </div>
+            </div>
+
+            <div className="grid gap-2 sm:grid-cols-2 lg:w-[340px]">
+              <button
+                type="button"
+                onClick={() => window.print()}
+                className="rounded-2xl bg-[rgb(var(--primary))] px-4 py-3 text-sm font-semibold text-white transition hover:opacity-90"
+              >
+                Print / Save PDF
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setConfirmResetOpen(true)}
+                className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-3 text-sm font-semibold text-[rgb(var(--text))] transition hover:bg-[rgba(var(--card),0.8)]"
+              >
+                Reset draft
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setTab("patient")}
+                className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-3 text-sm font-semibold text-[rgb(var(--text))] transition hover:bg-[rgba(var(--card),0.8)]"
+              >
+                Patient details
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setTab("meds")}
+                className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-3 text-sm font-semibold text-[rgb(var(--text))] transition hover:bg-[rgba(var(--card),0.8)]"
+              >
+                Medications
+              </button>
             </div>
           </div>
-        )}
-      </div>
+        </section>
 
-      <main className="mx-auto max-w-6xl px-4 py-6">
-        <div className="print-only hidden">
-          <div className="print-card">
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "baseline",
-              }}
-            >
-              <h1 style={{ margin: 0, fontSize: 18 }}>Medication Report</h1>
-              <div style={{ fontSize: 11 }}>Printed: {todayISO()}</div>
-            </div>
+        <VoiceScribe
+          onApply={applyScribeDraft}
+          resetSignal={scribeResetSignal}
+        />
 
-            <div style={{ marginTop: 10, fontSize: 12 }}>
-              <div>
-                <b>Patient:</b> {patientName || "__________"}
-              </div>
-              <div>
-                <b>DOB:</b> {dob || "__________"}
-              </div>
-              <div>
-                <b>MRN:</b> {mrn || "__________"}
-              </div>
-              <div>
-                <b>Allergies:</b> {allergies || "__________"}
-              </div>
-              <div>
-                <b>Intolerances:</b> {intolerances || "__________"}
-              </div>
-              <div>
-                <b>Carer:</b> {carer || "__________"}
-              </div>
-            </div>
-
-            <div style={{ marginTop: 10, fontSize: 12 }}>
-              <div>
-                <b>This Review Date:</b> {reviewDate || "__________"}
-              </div>
-              <div>
-                <b>Review completed by:</b> {reviewCompletedBy || "__________"}
-              </div>
-              <div>
-                <b>Treatment Goals:</b> {treatmentGoals || "__________"}
-              </div>
-            </div>
-
-            <div style={{ marginTop: 10, fontSize: 12 }}>
-              <div>
-                <b>Significant Medical & Surgical History:</b>{" "}
-                {significantHistory || "__________"}
-              </div>
-            </div>
-
-            <div style={{ marginTop: 10, fontSize: 12 }}>
-              <div>
-                <b>Next Review Date:</b> {nextReviewDate || "__________"}
-              </div>
-              <div>
-                <b>Mode:</b> {nextReviewMode || "__________"}
-              </div>
-              <div>
-                <b>Before Next Review:</b> {beforeNextReview || "__________"}
-              </div>
-            </div>
-
-            <div style={{ marginTop: 12 }}>
-              {sections.map((sec) => {
-                const sys = systemById.get(sec.systemId);
-                if (!sec.rows?.length) return null;
-
+        <section className="rounded-[28px] border border-[rgb(var(--border))] bg-[rgb(var(--surface))] p-4 shadow-sm md:p-5">
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+            <div className="flex flex-wrap gap-2">
+              {[
+                { key: "meds", label: "Medications" },
+                { key: "patient", label: "Patient" },
+                { key: "review", label: "Review & print" },
+              ].map((item) => {
+                const active = tab === item.key;
                 return (
-                  <div
-                    key={sec.id}
-                    className="avoid-break"
-                    style={{ marginTop: 12 }}
+                  <button
+                    key={item.key}
+                    type="button"
+                    onClick={() => setTab(item.key as TabKey)}
+                    className={[
+                      "rounded-2xl px-4 py-2 text-sm font-semibold transition",
+                      active
+                        ? "bg-[rgb(var(--primary))] text-white"
+                        : "border border-[rgb(var(--border))] bg-[rgb(var(--surface))] text-[rgb(var(--text))] hover:bg-[rgba(var(--card),0.8)]",
+                    ].join(" ")}
                   >
-                    <div style={{ fontSize: 13, fontWeight: 700 }}>
-                      {sys?.name || "System"}{" "}
-                      <span style={{ fontWeight: 400, fontSize: 11 }}>
-                        (Dx: {sec.diagnosis || "____"} | Date:{" "}
-                        {sec.diagnosisDate || "____"})
-                      </span>
-                    </div>
-
-                    <table
-                      style={{
-                        width: "100%",
-                        borderCollapse: "collapse",
-                        fontSize: 11,
-                        marginTop: 6,
-                      }}
-                    >
-                      <thead>
-                        <tr>
-                          {[
-                            "Medication",
-                            "Dose",
-                            "How",
-                            "Purpose",
-                            "Plan",
-                            ...customColumns.map((c) => c.title),
-                          ].map((h) => (
-                            <th
-                              key={h}
-                              style={{
-                                textAlign: "left",
-                                borderBottom: "1px solid #111827",
-                                padding: "6px 4px",
-                              }}
-                            >
-                              {h}
-                            </th>
-                          ))}
-                        </tr>
-                      </thead>
-
-                      <tbody>
-                        {sec.rows.map((r) => (
-                          <tr key={r.id}>
-                            <td
-                              style={{
-                                borderBottom: "1px solid #E5E7EB",
-                                padding: "6px 4px",
-                              }}
-                            >
-                              {r.medication || "____"}
-                            </td>
-                            <td
-                              style={{
-                                borderBottom: "1px solid #E5E7EB",
-                                padding: "6px 4px",
-                              }}
-                            >
-                              {r.dose || "____"}
-                            </td>
-                            <td
-                              style={{
-                                borderBottom: "1px solid #E5E7EB",
-                                padding: "6px 4px",
-                              }}
-                            >
-                              {r.how || "____"}
-                            </td>
-                            <td
-                              style={{
-                                borderBottom: "1px solid #E5E7EB",
-                                padding: "6px 4px",
-                              }}
-                            >
-                              {r.purpose || "____"}
-                            </td>
-                            <td
-                              style={{
-                                borderBottom: "1px solid #E5E7EB",
-                                padding: "6px 4px",
-                              }}
-                            >
-                              {r.plan || "____"}
-                            </td>
-
-                            {customColumns.map((c) => (
-                              <td
-                                key={c.id}
-                                style={{
-                                  borderBottom: "1px solid #E5E7EB",
-                                  padding: "6px 4px",
-                                }}
-                              >
-                                {r.extra?.[c.id] || "____"}
-                              </td>
-                            ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                    {item.label}
+                  </button>
                 );
               })}
             </div>
 
-            <div style={{ marginTop: 12, fontSize: 12 }}>
-              <div>
-                <b>Notes:</b> {notes || "__________"}
+            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-end">
+              <div className="relative min-w-[240px]">
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search medications, systems, dose, purpose..."
+                  className="w-full rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-3 text-sm outline-none transition focus:border-[rgb(var(--primary))]"
+                />
               </div>
+
+              <label className="inline-flex items-center gap-2 rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-3 text-sm text-[rgb(var(--text))]">
+                <input
+                  type="checkbox"
+                  checked={incompleteOnly}
+                  onChange={(e) => setIncompleteOnly(e.target.checked)}
+                />
+                Show incomplete only
+              </label>
+
+              <button
+                type="button"
+                onClick={() => setShowMore((v) => !v)}
+                className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-3 text-sm font-semibold text-[rgb(var(--text))] transition hover:bg-[rgba(var(--card),0.8)]"
+              >
+                {showMore ? "Hide advanced" : "Advanced"}
+              </button>
             </div>
           </div>
-        </div>
 
-        <div className="no-print space-y-5">
-          {tab === "meds" && (
-            <div className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] p-4">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-                <div>
-                  <div className="text-base font-bold">Medications</div>
-                  <div className="text-xs text-[rgb(var(--muted))]">
-                    Grouped by system. Fast add/edit from a sheet. Status shows
-                    what’s missing.
-                  </div>
-                </div>
-
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                  <select
-                    className="w-full rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--card))] px-3 py-2 text-sm sm:w-72"
-                    value={addSystemId}
-                    onChange={(e) => setAddSystemId(e.target.value)}
-                  >
-                    <option value="">Add System...</option>
-                    {systems.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.name}
-                      </option>
-                    ))}
-                  </select>
-
+          {showMore && (
+            <div className="mt-4 grid gap-4 rounded-3xl border border-[rgb(var(--border))] bg-[rgba(var(--card),0.8)] p-4 xl:grid-cols-[1fr_auto_auto] xl:items-end">
+              <div>
+                <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-[rgb(var(--muted))]">
+                  Add custom column
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    value={newColTitle}
+                    onChange={(e) => setNewColTitle(e.target.value)}
+                    placeholder="Example: Prescriber / Route / Supply"
+                    className="w-full rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-3 text-sm outline-none transition focus:border-[rgb(var(--primary))]"
+                  />
                   <button
                     type="button"
-                    className="rounded-xl bg-[rgb(var(--primary))] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
-                    disabled={!addSystemId}
-                    onClick={() => {
-                      addSectionForSystem(addSystemId);
-                      setAddSystemId("");
-                    }}
+                    onClick={addCustomColumn}
+                    className="rounded-2xl bg-[rgb(var(--primary))] px-4 py-3 text-sm font-semibold text-white transition hover:opacity-90"
                   >
-                    Add System
+                    Add
                   </button>
                 </div>
               </div>
 
-              <VoiceScribe onApply={applyScribeDraft} />
+              <div>
+                <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-[rgb(var(--muted))]">
+                  Entry mode
+                </label>
+                <select
+                  value={inputMode}
+                  onChange={(e) => setInputMode(e.target.value as InputMode)}
+                  className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-3 text-sm outline-none"
+                >
+                  <option value="smart">Smart</option>
+                  <option value="pick">Pick lists</option>
+                  <option value="type">Free type</option>
+                </select>
+              </div>
 
-              <div className="mt-4 rounded-2xl border border-[rgb(var(--border))] bg-[rgba(var(--card),0.55)] p-3">
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="text-sm font-semibold">Custom Columns</div>
+              <label className="inline-flex items-center gap-2 rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-3 text-sm text-[rgb(var(--text))]">
+                <input
+                  type="checkbox"
+                  checked={dense}
+                  onChange={(e) => setDense(e.target.checked)}
+                />
+                Dense table layout
+              </label>
 
-                  <div className="flex gap-2">
-                    <input
-                      className="w-full rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--card))] px-3 py-2 text-sm sm:w-72"
-                      value={newColTitle}
-                      onChange={(e) => setNewColTitle(e.target.value)}
-                      placeholder="e.g. Route / Duration / PRN / Notes..."
-                    />
-
-                    <button
-                      type="button"
-                      className="rounded-xl bg-[rgb(var(--primary))] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
-                      disabled={!newColTitle.trim()}
-                      onClick={addColumn}
-                    >
-                      Add
-                    </button>
+              {customColumns.length > 0 && (
+                <div className="xl:col-span-3">
+                  <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-[rgb(var(--muted))]">
+                    Custom columns
                   </div>
-                </div>
-
-                {customColumns.length > 0 && (
-                  <div className="mt-2 flex flex-wrap gap-2">
+                  <div className="flex flex-wrap gap-2">
                     {customColumns.map((c) => (
                       <span
                         key={c.id}
-                        className="inline-flex items-center gap-2 rounded-full border border-[rgb(var(--border))] bg-[rgb(var(--card))] px-3 py-1 text-xs"
+                        className="inline-flex items-center gap-2 rounded-full border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-1.5 text-sm"
                       >
                         {c.title}
                         <button
                           type="button"
-                          className="rounded-full border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-2 py-0.5 text-xs font-semibold"
-                          onClick={() => removeColumn(c.id)}
-                          title="Remove column"
+                          onClick={() => removeCustomColumn(c.id)}
+                          className="text-[rgb(var(--muted))] transition hover:text-[rgb(var(--danger))]"
+                          aria-label={`Remove ${c.title}`}
                         >
-                          x
+                          ×
                         </button>
                       </span>
                     ))}
                   </div>
-                )}
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+
+        {tab === "patient" && (
+          <section className="grid gap-4 xl:grid-cols-[1.2fr_1fr]">
+            <div className="rounded-[28px] border border-[rgb(var(--border))] bg-[rgb(var(--surface))] p-5 shadow-sm">
+              <div className="mb-4">
+                <h2 className="text-lg font-semibold">Patient details</h2>
+                <p className="mt-1 text-sm text-[rgb(var(--muted))]">
+                  These fields appear in the printed report and should stay
+                  clean and clinician-facing.
+                </p>
               </div>
 
-              <div className="mt-4 space-y-4">
-                {filteredSections.length === 0 ? (
-                  <div className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] p-4 text-sm text-[rgb(var(--muted))]">
-                    No systems yet. Add one from the dropdown above.
+              <div className="grid gap-4 md:grid-cols-2">
+                <Field label="Patient name" required>
+                  <input
+                    value={patientName}
+                    onChange={(e) => setPatientName(e.target.value)}
+                    className="field"
+                    placeholder="Full name"
+                  />
+                </Field>
+
+                <Field label="MRN / case number">
+                  <input
+                    value={mrn}
+                    onChange={(e) => setMrn(e.target.value)}
+                    className="field"
+                    placeholder="Medical record number"
+                  />
+                </Field>
+
+                <Field label="Date of birth">
+                  <input
+                    type="date"
+                    value={dob}
+                    onChange={(e) => setDob(e.target.value)}
+                    className="field"
+                  />
+                </Field>
+
+                <Field label="Carer / representative">
+                  <input
+                    value={carer}
+                    onChange={(e) => setCarer(e.target.value)}
+                    className="field"
+                    placeholder="Optional"
+                  />
+                </Field>
+
+                <Field label="Allergies">
+                  <textarea
+                    value={allergies}
+                    onChange={(e) => setAllergies(e.target.value)}
+                    className="field min-h-[110px]"
+                    placeholder="List known allergies"
+                  />
+                </Field>
+
+                <Field label="Intolerances">
+                  <textarea
+                    value={intolerances}
+                    onChange={(e) => setIntolerances(e.target.value)}
+                    className="field min-h-[110px]"
+                    placeholder="List known intolerances"
+                  />
+                </Field>
+              </div>
+            </div>
+
+            <div className="rounded-[28px] border border-[rgb(var(--border))] bg-[rgb(var(--surface))] p-5 shadow-sm">
+              <div className="mb-4">
+                <h2 className="text-lg font-semibold">History</h2>
+                <p className="mt-1 text-sm text-[rgb(var(--muted))]">
+                  Significant history imported from voice or entered manually.
+                </p>
+              </div>
+
+              <Field label="Significant history">
+                <textarea
+                  value={significantHistory}
+                  onChange={(e) => setSignificantHistory(e.target.value)}
+                  className="field min-h-[300px]"
+                  placeholder="Relevant background, chronic conditions, prior issues..."
+                />
+              </Field>
+            </div>
+          </section>
+        )}
+
+        {tab === "meds" && (
+          <section className="grid gap-4 xl:grid-cols-[320px_1fr]">
+            <aside className="rounded-[28px] border border-[rgb(var(--border))] bg-[rgb(var(--surface))] p-5 shadow-sm">
+              <div className="mb-4">
+                <h2 className="text-lg font-semibold">Systems</h2>
+                <p className="mt-1 text-sm text-[rgb(var(--muted))]">
+                  Add a clinical system, then attach medications underneath it.
+                </p>
+              </div>
+
+              <Field label="Add system">
+                <div className="flex gap-2">
+                  <select
+                    value={addSystemId}
+                    onChange={(e) => setAddSystemId(e.target.value)}
+                    className="field"
+                  >
+                    <option value="">Select system</option>
+                    {systems.map((sys) => (
+                      <option key={sys.id} value={sys.id}>
+                        {sys.name}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => addSystemSection(addSystemId)}
+                    className="rounded-2xl bg-[rgb(var(--primary))] px-4 py-3 text-sm font-semibold text-white transition hover:opacity-90"
+                  >
+                    Add
+                  </button>
+                </div>
+              </Field>
+
+              <div className="mt-5 space-y-2">
+                {sections.length === 0 ? (
+                  <div className="rounded-2xl border border-dashed border-[rgb(var(--border))] bg-[rgba(var(--card),0.8)] px-4 py-4 text-sm text-[rgb(var(--muted))]">
+                    No systems added yet.
                   </div>
                 ) : (
-                  filteredSections.map(({ sec, rows }) => {
+                  sections.map((sec) => {
                     const sys = systemById.get(sec.systemId);
-                    const secRows = normalize(search) ? rows : sec.rows;
-
-                    const secIncomplete = sec.rows.filter(rowIncomplete).length;
-                    const secReady = sec.rows.length > 0 && secIncomplete === 0;
-
+                    const active = filteredSections.some(
+                      (x) => x.id === sec.id,
+                    );
                     return (
-                      <div
+                      <button
                         key={sec.id}
-                        className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] p-4"
+                        type="button"
+                        onClick={() => {
+                          setTab("meds");
+                          const el = document.getElementById(
+                            `section-${sec.id}`,
+                          );
+                          el?.scrollIntoView({
+                            behavior: "smooth",
+                            block: "start",
+                          });
+                        }}
+                        className={[
+                          "w-full rounded-2xl border px-4 py-3 text-left transition",
+                          active
+                            ? "border-[rgb(var(--primary))] bg-[rgb(var(--primary-soft))]"
+                            : "border-[rgb(var(--border))] bg-[rgb(var(--surface))] hover:bg-[rgba(var(--card),0.8)]",
+                        ].join(" ")}
                       >
-                        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <div className="text-sm font-bold">
-                                {sys?.name ?? "System"}
-                              </div>
-
-                              <span
-                                className={[
-                                  "inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold",
-                                  sec.rows.length === 0
-                                    ? "border-slate-200 bg-slate-50 text-slate-600"
-                                    : secReady
-                                      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                                      : "border-amber-200 bg-amber-50 text-amber-800",
-                                ].join(" ")}
-                              >
-                                {sec.rows.length === 0
-                                  ? "No meds"
-                                  : secReady
-                                    ? "Ready"
-                                    : `${secIncomplete} incomplete`}
-                              </span>
-                            </div>
-
-                            <div className="text-xs text-[rgb(var(--muted))]">
-                              Diagnosis + date are per system.
-                            </div>
-                          </div>
-
-                          <div className="flex flex-wrap items-center gap-2">
-                            <button
-                              type="button"
-                              onClick={() => openCreateMedication(sec.id)}
-                              className="rounded-xl bg-[rgb(var(--primary))] px-4 py-2 text-sm font-semibold text-white"
-                            >
-                              + Add Medication
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={() => addTemplateRows(sec.id)}
-                              className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-2 text-sm font-semibold"
-                              title="Add system template rows"
-                            >
-                              Add Templates
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={() => removeSection(sec.id)}
-                              className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-2 text-sm font-semibold"
-                              title="Remove system"
-                            >
-                              Remove
-                            </button>
-                          </div>
+                        <div className="text-sm font-semibold">
+                          {sys?.name ?? "Unknown system"}
                         </div>
-
-                        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-                          <LabeledInput
-                            label="Diagnosis"
-                            value={sec.diagnosis}
-                            onChange={(v) =>
-                              updateSection(sec.id, { diagnosis: v })
-                            }
-                          />
-
-                          <LabeledDate
-                            label="Diagnosis date"
-                            value={sec.diagnosisDate}
-                            onChange={(v) =>
-                              updateSection(sec.id, { diagnosisDate: v })
-                            }
-                          />
+                        <div className="mt-1 text-xs text-[rgb(var(--muted))]">
+                          {sec.rows.length} medication
+                          {sec.rows.length !== 1 ? "s" : ""}
                         </div>
-
-                        <div className="mt-4 hidden md:block">
-                          <div className="overflow-x-auto rounded-2xl border border-[rgb(var(--border))]">
-                            <table
-                              className={[
-                                "min-w-[980px] w-full",
-                                dense ? "text-[13px]" : "text-sm",
-                              ].join(" ")}
-                            >
-                              <thead className="bg-[rgba(var(--card),0.6)] text-xs text-[rgb(var(--muted))]">
-                                <tr>
-                                  <th className="px-3 py-2 text-left">
-                                    Medication
-                                  </th>
-                                  <th className="px-3 py-2 text-left">Dose</th>
-                                  <th className="px-3 py-2 text-left">How</th>
-                                  <th className="px-3 py-2 text-left">
-                                    Purpose
-                                  </th>
-                                  <th className="px-3 py-2 text-left">Plan</th>
-                                  {customColumns.map((c) => (
-                                    <th
-                                      key={c.id}
-                                      className="px-3 py-2 text-left"
-                                    >
-                                      {c.title}
-                                    </th>
-                                  ))}
-                                  <th className="px-3 py-2 text-left">
-                                    Actions
-                                  </th>
-                                </tr>
-                              </thead>
-
-                              <tbody>
-                                {secRows.length === 0 ? (
-                                  <tr>
-                                    <td
-                                      colSpan={6 + customColumns.length}
-                                      className="px-3 py-4 text-sm text-[rgb(var(--muted))]"
-                                    >
-                                      No medications yet. Click “Add
-                                      Medication”.
-                                    </td>
-                                  </tr>
-                                ) : (
-                                  secRows.map((r) => {
-                                    const incomplete = rowIncomplete(r);
-
-                                    return (
-                                      <tr
-                                        key={r.id}
-                                        className={[
-                                          "border-t border-[rgb(var(--border))]",
-                                          incomplete ? "bg-amber-50" : "",
-                                        ].join(" ")}
-                                      >
-                                        <td className="px-3 py-2">
-                                          <button
-                                            type="button"
-                                            onClick={() =>
-                                              openEditMedication(sec.id, r)
-                                            }
-                                            className="w-full text-left"
-                                          >
-                                            <div className="font-semibold">
-                                              {r.medication || (
-                                                <span className="text-[rgb(var(--muted))]">
-                                                  Click to edit…
-                                                </span>
-                                              )}
-                                            </div>
-                                          </button>
-                                        </td>
-
-                                        <td className="px-3 py-2">
-                                          {r.dose || (
-                                            <span className="text-[rgb(var(--muted))]">
-                                              —
-                                            </span>
-                                          )}
-                                        </td>
-
-                                        <td className="px-3 py-2">
-                                          {r.how || (
-                                            <span className="text-[rgb(var(--muted))]">
-                                              —
-                                            </span>
-                                          )}
-                                        </td>
-
-                                        <td className="px-3 py-2">
-                                          {r.purpose || (
-                                            <span className="text-[rgb(var(--muted))]">
-                                              —
-                                            </span>
-                                          )}
-                                        </td>
-
-                                        <td className="px-3 py-2">
-                                          {r.plan || (
-                                            <span className="text-[rgb(var(--muted))]">
-                                              —
-                                            </span>
-                                          )}
-                                        </td>
-
-                                        {customColumns.map((c) => (
-                                          <td key={c.id} className="px-3 py-2">
-                                            {r.extra?.[c.id] || (
-                                              <span className="text-[rgb(var(--muted))]">
-                                                —
-                                              </span>
-                                            )}
-                                          </td>
-                                        ))}
-
-                                        <td className="px-3 py-2">
-                                          <div className="flex items-center gap-2">
-                                            <button
-                                              type="button"
-                                              onClick={() =>
-                                                openEditMedication(sec.id, r)
-                                              }
-                                              className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-2 text-xs font-semibold"
-                                            >
-                                              Edit
-                                            </button>
-
-                                            <button
-                                              type="button"
-                                              onClick={() =>
-                                                duplicateRow(sec.id, r.id)
-                                              }
-                                              className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-2 text-xs font-semibold"
-                                            >
-                                              Duplicate
-                                            </button>
-
-                                            <button
-                                              type="button"
-                                              onClick={() =>
-                                                deleteRow(sec.id, r.id)
-                                              }
-                                              className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-2 text-xs font-semibold"
-                                            >
-                                              Delete
-                                            </button>
-                                          </div>
-                                        </td>
-                                      </tr>
-                                    );
-                                  })
-                                )}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-
-                        <div className="mt-4 space-y-3 md:hidden">
-                          {secRows.length === 0 ? (
-                            <div className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] p-4 text-sm text-[rgb(var(--muted))]">
-                              No medications yet.
-                            </div>
-                          ) : (
-                            secRows.map((r) => {
-                              const incomplete = rowIncomplete(r);
-
-                              return (
-                                <details
-                                  key={r.id}
-                                  className={[
-                                    "rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] p-4",
-                                    incomplete ? "ring-1 ring-amber-200" : "",
-                                  ].join(" ")}
-                                >
-                                  <summary className="list-none cursor-pointer">
-                                    <div className="flex items-center justify-between gap-2">
-                                      <div>
-                                        <div className="font-semibold">
-                                          {r.medication ||
-                                            "Medication (tap to edit)"}
-                                        </div>
-                                        <div className="text-xs text-[rgb(var(--muted))]">
-                                          {r.dose || "Dose —"} •{" "}
-                                          {r.how || "How —"}
-                                        </div>
-                                      </div>
-
-                                      <span className="text-xs text-[rgb(var(--muted))]">
-                                        Expand
-                                      </span>
-                                    </div>
-                                  </summary>
-
-                                  <div className="mt-3 flex flex-wrap gap-2">
-                                    <button
-                                      type="button"
-                                      onClick={() =>
-                                        openEditMedication(sec.id, r)
-                                      }
-                                      className="rounded-xl bg-[rgb(var(--primary))] px-4 py-2 text-sm font-semibold text-white"
-                                    >
-                                      Edit
-                                    </button>
-
-                                    <button
-                                      type="button"
-                                      onClick={() => duplicateRow(sec.id, r.id)}
-                                      className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-2 text-sm font-semibold"
-                                    >
-                                      Duplicate
-                                    </button>
-
-                                    <button
-                                      type="button"
-                                      onClick={() => deleteRow(sec.id, r.id)}
-                                      className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-2 text-sm font-semibold"
-                                    >
-                                      Delete
-                                    </button>
-                                  </div>
-
-                                  <div className="mt-3 text-sm">
-                                    <div>
-                                      <b>Purpose:</b> {r.purpose || "—"}
-                                    </div>
-                                    <div>
-                                      <b>Plan:</b> {r.plan || "—"}
-                                    </div>
-
-                                    {customColumns.map((c) => (
-                                      <div key={c.id}>
-                                        <b>{c.title}:</b>{" "}
-                                        {r.extra?.[c.id] || "—"}
-                                      </div>
-                                    ))}
-                                  </div>
-                                </details>
-                              );
-                            })
-                          )}
-                        </div>
-                      </div>
+                      </button>
                     );
                   })
                 )}
               </div>
-            </div>
-          )}
-
-          {tab === "patient" && (
-            <div className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] p-4">
-              <div className="text-sm font-bold uppercase tracking-wide text-[rgb(var(--muted))]">
-                Patient Information
-              </div>
-
-              <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
-                <Card title="Demographics">
-                  <Grid2>
-                    <LabeledInput
-                      label="Patient name"
-                      value={patientName}
-                      onChange={setPatientName}
-                    />
-
-                    <LabeledDate
-                      label="Date of birth"
-                      value={dob}
-                      onChange={setDob}
-                    />
-
-                    <LabeledInput label="MRN" value={mrn} onChange={setMrn} />
-
-                    <LabeledInput
-                      label="Carer"
-                      value={carer}
-                      onChange={setCarer}
-                    />
-
-                    <LabeledInput
-                      label="Allergies"
-                      value={allergies}
-                      onChange={setAllergies}
-                    />
-
-                    <LabeledInput
-                      label="Intolerances"
-                      value={intolerances}
-                      onChange={setIntolerances}
-                    />
-                  </Grid2>
-                </Card>
-
-                <Card title="Significant Medical & Surgical History">
-                  <textarea
-                    className="w-full rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--card))] px-3 py-2 text-sm"
-                    rows={10}
-                    value={significantHistory}
-                    onChange={(e) => setSignificantHistory(e.target.value)}
-                  />
-                </Card>
-              </div>
-            </div>
-          )}
-
-          {tab === "review" && (
+            </aside>
             <div className="space-y-4">
-              <div className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] p-4">
-                <div className="text-sm font-bold uppercase tracking-wide text-[rgb(var(--muted))]">
-                  Review
+              {filteredSections.length === 0 ? (
+                <div className="rounded-[28px] border border-dashed border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-6 py-12 text-center shadow-sm">
+                  <div className="text-lg font-semibold">
+                    No matching medication sections
+                  </div>
+                  <p className="mt-2 text-sm text-[rgb(var(--muted))]">
+                    Add a system from the left panel or import medications from
+                    Voice Intake.
+                  </p>
                 </div>
+              ) : (
+                filteredSections.map((sec) => {
+                  const sys = systemById.get(sec.systemId);
+                  const templates = sys?.row_templates ?? [];
 
-                <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
-                  <Card title="Review Details">
-                    <Grid2>
-                      <LabeledDate
-                        label="This Review Date"
-                        value={reviewDate}
-                        onChange={setReviewDate}
-                      />
+                  return (
+                    <section
+                      key={sec.id}
+                      id={`section-${sec.id}`}
+                      className="rounded-[28px] border border-[rgb(var(--border))] bg-[rgb(var(--surface))] p-4 shadow-sm md:p-5"
+                    >
+                      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                        <div className="space-y-3">
+                          <div>
+                            <h3 className="text-lg font-semibold">
+                              {sys?.name ?? "System"}
+                            </h3>
+                            <p className="mt-1 text-sm text-[rgb(var(--muted))]">
+                              Manage medications under this system.
+                            </p>
+                          </div>
 
-                      <LabeledInput
-                        label="Review completed by"
-                        value={reviewCompletedBy}
-                        onChange={setReviewCompletedBy}
-                      />
-                    </Grid2>
+                          <div className="grid gap-3 sm:grid-cols-2">
+                            <Field label="Diagnosis">
+                              <input
+                                value={sec.diagnosis}
+                                onChange={(e) =>
+                                  setSections((prev) =>
+                                    prev.map((s) =>
+                                      s.id === sec.id
+                                        ? { ...s, diagnosis: e.target.value }
+                                        : s,
+                                    ),
+                                  )
+                                }
+                                className="field"
+                                placeholder="Diagnosis"
+                              />
+                            </Field>
 
-                    <div className="mt-3">
-                      <label className="mb-1 block text-sm font-semibold">
-                        Treatment Goals
-                      </label>
+                            <Field label="Diagnosis date">
+                              <input
+                                type="date"
+                                value={sec.diagnosisDate}
+                                onChange={(e) =>
+                                  setSections((prev) =>
+                                    prev.map((s) =>
+                                      s.id === sec.id
+                                        ? {
+                                            ...s,
+                                            diagnosisDate: e.target.value,
+                                          }
+                                        : s,
+                                    ),
+                                  )
+                                }
+                                className="field"
+                              />
+                            </Field>
+                          </div>
+                        </div>
 
-                      <textarea
-                        className="w-full rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--card))] px-3 py-2 text-sm"
-                        rows={5}
-                        value={treatmentGoals}
-                        onChange={(e) => setTreatmentGoals(e.target.value)}
-                      />
-                    </div>
-                  </Card>
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            onClick={() => openAddRow(sec.id)}
+                            className="rounded-2xl bg-[rgb(var(--primary))] px-4 py-2 text-sm font-semibold text-white transition hover:opacity-90"
+                          >
+                            Add medication
+                          </button>
 
-                  <Card title="Next Review">
-                    <div className="grid grid-cols-1 gap-3">
-                      <LabeledDate
-                        label="Date"
-                        value={nextReviewDate}
-                        onChange={setNextReviewDate}
-                      />
-
-                      <div>
-                        <label className="mb-1 block text-sm font-semibold">
-                          In-person / Video
-                        </label>
-
-                        <select
-                          className="w-full rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--card))] px-3 py-2 text-sm"
-                          value={nextReviewMode}
-                          onChange={(e) =>
-                            setNextReviewMode(
-                              e.target.value as "" | "In-person" | "Video",
-                            )
-                          }
-                        >
-                          <option value="">Select...</option>
-                          <option value="In-person">In-person</option>
-                          <option value="Video">Video</option>
-                        </select>
+                          <button
+                            type="button"
+                            onClick={() => removeSystemSection(sec.id)}
+                            className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-2 text-sm font-semibold text-[rgb(var(--danger))] transition hover:bg-[rgba(var(--card),0.8)]"
+                          >
+                            Remove system
+                          </button>
+                        </div>
                       </div>
 
-                      <div>
-                        <label className="mb-1 block text-sm font-semibold">
-                          Before Next Review
-                        </label>
+                      {templates.length > 0 && (
+                        <div className="mt-4 rounded-3xl border border-[rgb(var(--border))] bg-[rgba(var(--card),0.75)] p-4">
+                          <div className="text-xs font-semibold uppercase tracking-wide text-[rgb(var(--muted))]">
+                            Quick templates
+                          </div>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {templates.map((t, idx) => {
+                              const medName =
+                                t.medication_options?.[0] ||
+                                `Template ${idx + 1}`;
+                              return (
+                                <button
+                                  key={`${sec.id}-template-${idx}`}
+                                  type="button"
+                                  onClick={() => {
+                                    openAddRow(sec.id);
+                                    setTimeout(() => {
+                                      applyTemplateToEditor(sec.id, idx);
+                                    }, 0);
+                                  }}
+                                  className="rounded-full border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-1.5 text-sm font-medium transition hover:bg-[rgba(var(--primary),0.08)]"
+                                >
+                                  {medName}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
 
-                        <textarea
-                          className="w-full rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--card))] px-3 py-2 text-sm"
-                          rows={5}
-                          value={beforeNextReview}
-                          onChange={(e) => setBeforeNextReview(e.target.value)}
-                        />
+                      <div className="mt-4">
+                        {sec.rows.length === 0 ? (
+                          <div className="rounded-2xl border border-dashed border-[rgb(var(--border))] bg-[rgba(var(--card),0.6)] px-4 py-8 text-center text-sm text-[rgb(var(--muted))]">
+                            No medications added in this system yet.
+                          </div>
+                        ) : (
+                          <>
+                            <div className="hidden overflow-x-auto lg:block">
+                              <table
+                                className={[
+                                  "w-full min-w-[980px] border-separate border-spacing-0 overflow-hidden rounded-3xl border border-[rgb(var(--border))]",
+                                  dense ? "text-[13px]" : "text-sm",
+                                ].join(" ")}
+                              >
+                                <thead>
+                                  <tr className="bg-[rgba(var(--card),0.8)] text-left text-[rgb(var(--muted))]">
+                                    <th className="border-b border-[rgb(var(--border))] px-4 py-3 font-semibold">
+                                      Medication
+                                    </th>
+                                    <th className="border-b border-[rgb(var(--border))] px-4 py-3 font-semibold">
+                                      Dose
+                                    </th>
+                                    <th className="border-b border-[rgb(var(--border))] px-4 py-3 font-semibold">
+                                      How
+                                    </th>
+                                    <th className="border-b border-[rgb(var(--border))] px-4 py-3 font-semibold">
+                                      Purpose
+                                    </th>
+                                    <th className="border-b border-[rgb(var(--border))] px-4 py-3 font-semibold">
+                                      Plan
+                                    </th>
+                                    {customColumns.map((c) => (
+                                      <th
+                                        key={c.id}
+                                        className="border-b border-[rgb(var(--border))] px-4 py-3 font-semibold"
+                                      >
+                                        {c.title}
+                                      </th>
+                                    ))}
+                                    <th className="border-b border-[rgb(var(--border))] px-4 py-3 font-semibold">
+                                      Actions
+                                    </th>
+                                  </tr>
+                                </thead>
+
+                                <tbody>
+                                  {sec.rows.map((row, idx) => (
+                                    <tr
+                                      key={row.id}
+                                      className={
+                                        idx % 2 === 0
+                                          ? "bg-[rgb(var(--surface))]"
+                                          : "bg-[rgba(var(--card),0.5)]"
+                                      }
+                                    >
+                                      <td className="border-b border-[rgb(var(--border))] px-4 py-3 align-top">
+                                        <div className="font-semibold">
+                                          {row.medication || (
+                                            <span className="text-[rgb(var(--muted))]">
+                                              —
+                                            </span>
+                                          )}
+                                        </div>
+                                      </td>
+                                      <td className="border-b border-[rgb(var(--border))] px-4 py-3 align-top">
+                                        {row.dose || (
+                                          <span className="text-[rgb(var(--muted))]">
+                                            —
+                                          </span>
+                                        )}
+                                      </td>
+                                      <td className="border-b border-[rgb(var(--border))] px-4 py-3 align-top">
+                                        {row.how || (
+                                          <span className="text-[rgb(var(--muted))]">
+                                            —
+                                          </span>
+                                        )}
+                                      </td>
+                                      <td className="border-b border-[rgb(var(--border))] px-4 py-3 align-top">
+                                        {row.purpose || (
+                                          <span className="text-[rgb(var(--muted))]">
+                                            —
+                                          </span>
+                                        )}
+                                      </td>
+                                      <td className="border-b border-[rgb(var(--border))] px-4 py-3 align-top">
+                                        {row.plan || (
+                                          <span className="text-[rgb(var(--muted))]">
+                                            —
+                                          </span>
+                                        )}
+                                      </td>
+
+                                      {customColumns.map((c) => (
+                                        <td
+                                          key={`${row.id}-${c.id}`}
+                                          className="border-b border-[rgb(var(--border))] px-4 py-3 align-top"
+                                        >
+                                          {row.extra?.[c.id] || (
+                                            <span className="text-[rgb(var(--muted))]">
+                                              —
+                                            </span>
+                                          )}
+                                        </td>
+                                      ))}
+
+                                      <td className="border-b border-[rgb(var(--border))] px-4 py-3 align-top">
+                                        <div className="flex flex-wrap gap-2">
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              openEditRow(sec.id, row.id)
+                                            }
+                                            className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-2 text-xs font-semibold transition hover:bg-[rgba(var(--card),0.8)]"
+                                          >
+                                            Edit
+                                          </button>
+
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              duplicateRow(sec.id, row.id)
+                                            }
+                                            className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-2 text-xs font-semibold transition hover:bg-[rgba(var(--card),0.8)]"
+                                          >
+                                            Duplicate
+                                          </button>
+
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              moveRow(sec.id, row.id, -1)
+                                            }
+                                            className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-2 text-xs font-semibold transition hover:bg-[rgba(var(--card),0.8)]"
+                                          >
+                                            ↑
+                                          </button>
+
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              moveRow(sec.id, row.id, 1)
+                                            }
+                                            className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-2 text-xs font-semibold transition hover:bg-[rgba(var(--card),0.8)]"
+                                          >
+                                            ↓
+                                          </button>
+
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              removeRow(sec.id, row.id)
+                                            }
+                                            className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-2 text-xs font-semibold text-[rgb(var(--danger))] transition hover:bg-[rgba(var(--card),0.8)]"
+                                          >
+                                            Delete
+                                          </button>
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+
+                            <div className="grid gap-3 lg:hidden">
+                              {sec.rows.map((row) => (
+                                <div
+                                  key={row.id}
+                                  className="rounded-3xl border border-[rgb(var(--border))] bg-[rgba(var(--card),0.7)] p-4"
+                                >
+                                  <div className="flex items-start justify-between gap-3">
+                                    <div>
+                                      <div className="text-sm font-semibold">
+                                        {row.medication ||
+                                          "Untitled medication"}
+                                      </div>
+                                      <div className="mt-1 text-xs text-[rgb(var(--muted))]">
+                                        {row.dose || "No dose"} •{" "}
+                                        {row.plan || "No plan"}
+                                      </div>
+                                    </div>
+
+                                    <div className="flex flex-wrap gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          openEditRow(sec.id, row.id)
+                                        }
+                                        className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-2 text-xs font-semibold"
+                                      >
+                                        Edit
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          duplicateRow(sec.id, row.id)
+                                        }
+                                        className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-2 text-xs font-semibold"
+                                      >
+                                        Duplicate
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          removeRow(sec.id, row.id)
+                                        }
+                                        className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-2 text-xs font-semibold text-[rgb(var(--danger))]"
+                                      >
+                                        Delete
+                                      </button>
+                                    </div>
+                                  </div>
+
+                                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                                    <SummaryTile
+                                      label="Dose"
+                                      value={row.dose || "—"}
+                                    />
+                                    <SummaryTile
+                                      label="How"
+                                      value={row.how || "—"}
+                                    />
+                                    <SummaryTile
+                                      label="Purpose"
+                                      value={row.purpose || "—"}
+                                    />
+                                    <SummaryTile
+                                      label="Plan"
+                                      value={row.plan || "—"}
+                                    />
+                                    {customColumns.map((c) => (
+                                      <SummaryTile
+                                        key={`${row.id}-${c.id}-mobile`}
+                                        label={c.title}
+                                        value={row.extra?.[c.id] || "—"}
+                                      />
+                                    ))}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </>
+                        )}
                       </div>
-                    </div>
-                  </Card>
+                    </section>
+                  );
+                })
+              )}
+            </div>
+          </section>
+        )}
+
+        {tab === "review" && (
+          <section className="grid gap-4 xl:grid-cols-[360px_1fr]">
+            <div className="space-y-4">
+              <div className="rounded-[28px] border border-[rgb(var(--border))] bg-[rgb(var(--surface))] p-5 shadow-sm">
+                <h2 className="text-lg font-semibold">Review summary</h2>
+                <p className="mt-1 text-sm text-[rgb(var(--muted))]">
+                  Final printable snapshot before exporting.
+                </p>
+
+                <div className="mt-4 grid gap-3">
+                  <SummaryTile
+                    label="Patient"
+                    value={patientName || "Not entered"}
+                  />
+                  <SummaryTile label="MRN" value={mrn || "Not entered"} />
+                  <SummaryTile
+                    label="Review date"
+                    value={reviewDate || "Not entered"}
+                  />
+                  <SummaryTile
+                    label="Completed by"
+                    value={reviewCompletedBy || "Not entered"}
+                  />
+                  <SummaryTile label="Systems" value={`${sections.length}`} />
+                  <SummaryTile label="Medications" value={`${totalRows}`} />
                 </div>
               </div>
 
-              <div className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] p-4">
-                <div className="text-sm font-bold uppercase tracking-wide text-[rgb(var(--muted))]">
+              <div className="rounded-[28px] border border-[rgb(var(--border))] bg-[rgb(var(--surface))] p-5 shadow-sm">
+                <h2 className="text-lg font-semibold">Review notes</h2>
+                <div className="mt-4 grid gap-4">
+                  <Field label="Review completed by" required>
+                    <input
+                      value={reviewCompletedBy}
+                      onChange={(e) => setReviewCompletedBy(e.target.value)}
+                      className="field"
+                      placeholder="Clinician name"
+                    />
+                  </Field>
+
+                  <Field label="Treatment goals">
+                    <textarea
+                      value={treatmentGoals}
+                      onChange={(e) => setTreatmentGoals(e.target.value)}
+                      className="field min-h-[140px]"
+                      placeholder="Treatment goals"
+                    />
+                  </Field>
+
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <Field label="Next review date">
+                      <input
+                        type="date"
+                        value={nextReviewDate}
+                        onChange={(e) => setNextReviewDate(e.target.value)}
+                        className="field"
+                      />
+                    </Field>
+
+                    <Field label="Mode">
+                      <select
+                        value={nextReviewMode}
+                        onChange={(e) =>
+                          setNextReviewMode(
+                            e.target.value as "" | "In-person" | "Video",
+                          )
+                        }
+                        className="field"
+                      >
+                        <option value="">Select mode</option>
+                        <option value="In-person">In-person</option>
+                        <option value="Video">Video</option>
+                      </select>
+                    </Field>
+                  </div>
+
+                  <Field label="Before next review">
+                    <textarea
+                      value={beforeNextReview}
+                      onChange={(e) => setBeforeNextReview(e.target.value)}
+                      className="field min-h-[120px]"
+                      placeholder="Tasks before next review"
+                    />
+                  </Field>
+
+                  <Field label="Notes">
+                    <textarea
+                      value={notes}
+                      onChange={(e) => setNotes(e.target.value)}
+                      className="field min-h-[140px]"
+                      placeholder="Printable notes"
+                    />
+                  </Field>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-[28px] border border-[rgb(var(--border))] bg-white p-6 shadow-sm print:shadow-none">
+              <div className="border-b border-[rgb(var(--border))] pb-4">
+                <h2 className="text-2xl font-semibold">
+                  Clinical Medication Review
+                </h2>
+                <p className="mt-1 text-sm text-[rgb(var(--muted))]">
+                  Printable report preview
+                </p>
+              </div>
+
+              <div className="mt-5 grid gap-4 sm:grid-cols-2">
+                <SummaryTile label="Patient name" value={patientName || "—"} />
+                <SummaryTile label="Date of birth" value={dob || "—"} />
+                <SummaryTile label="MRN / case number" value={mrn || "—"} />
+                <SummaryTile label="Carer" value={carer || "—"} />
+              </div>
+
+              <div className="mt-6 grid gap-4 sm:grid-cols-2">
+                <SummaryTile label="Allergies" value={allergies || "—"} />
+                <SummaryTile label="Intolerances" value={intolerances || "—"} />
+              </div>
+
+              <div className="mt-6">
+                <div className="text-sm font-semibold uppercase tracking-wide text-[rgb(var(--muted))]">
+                  Significant history
+                </div>
+                <div className="mt-2 whitespace-pre-wrap rounded-2xl border border-[rgb(var(--border))] bg-[rgba(var(--card),0.7)] p-4 text-sm">
+                  {significantHistory || "—"}
+                </div>
+              </div>
+
+              <div className="mt-6">
+                <div className="text-sm font-semibold uppercase tracking-wide text-[rgb(var(--muted))]">
+                  Medications by system
+                </div>
+
+                <div className="mt-3 space-y-4">
+                  {sections.length === 0 ? (
+                    <div className="rounded-2xl border border-dashed border-[rgb(var(--border))] bg-[rgba(var(--card),0.65)] p-5 text-sm text-[rgb(var(--muted))]">
+                      No medication systems added yet.
+                    </div>
+                  ) : (
+                    sections.map((sec) => {
+                      const sys = systemById.get(sec.systemId);
+
+                      return (
+                        <div
+                          key={`review-${sec.id}`}
+                          className="rounded-3xl border border-[rgb(var(--border))] bg-[rgba(var(--card),0.6)] p-4"
+                        >
+                          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                            <div>
+                              <div className="font-semibold">
+                                {sys?.name ?? "System"}
+                              </div>
+                              <div className="mt-1 text-xs text-[rgb(var(--muted))]">
+                                Diagnosis: {sec.diagnosis || "—"} • Date:{" "}
+                                {sec.diagnosisDate || "—"}
+                              </div>
+                            </div>
+                            <div className="text-xs font-medium text-[rgb(var(--muted))]">
+                              {sec.rows.length} medication
+                              {sec.rows.length === 1 ? "" : "s"}
+                            </div>
+                          </div>
+
+                          {sec.rows.length > 0 ? (
+                            <div className="mt-4 overflow-x-auto">
+                              <table className="w-full min-w-[720px] border-separate border-spacing-0 text-sm">
+                                <thead>
+                                  <tr className="text-left text-[rgb(var(--muted))]">
+                                    <th className="border-b border-[rgb(var(--border))] px-3 py-2 font-semibold">
+                                      Medication
+                                    </th>
+                                    <th className="border-b border-[rgb(var(--border))] px-3 py-2 font-semibold">
+                                      Dose
+                                    </th>
+                                    <th className="border-b border-[rgb(var(--border))] px-3 py-2 font-semibold">
+                                      How
+                                    </th>
+                                    <th className="border-b border-[rgb(var(--border))] px-3 py-2 font-semibold">
+                                      Purpose
+                                    </th>
+                                    <th className="border-b border-[rgb(var(--border))] px-3 py-2 font-semibold">
+                                      Plan
+                                    </th>
+                                    {customColumns.map((c) => (
+                                      <th
+                                        key={`review-${sec.id}-${c.id}`}
+                                        className="border-b border-[rgb(var(--border))] px-3 py-2 font-semibold"
+                                      >
+                                        {c.title}
+                                      </th>
+                                    ))}
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {sec.rows.map((row) => (
+                                    <tr key={`review-row-${row.id}`}>
+                                      <td className="border-b border-[rgb(var(--border))] px-3 py-2">
+                                        {row.medication || "—"}
+                                      </td>
+                                      <td className="border-b border-[rgb(var(--border))] px-3 py-2">
+                                        {row.dose || "—"}
+                                      </td>
+                                      <td className="border-b border-[rgb(var(--border))] px-3 py-2">
+                                        {row.how || "—"}
+                                      </td>
+                                      <td className="border-b border-[rgb(var(--border))] px-3 py-2">
+                                        {row.purpose || "—"}
+                                      </td>
+                                      <td className="border-b border-[rgb(var(--border))] px-3 py-2">
+                                        {row.plan || "—"}
+                                      </td>
+                                      {customColumns.map((c) => (
+                                        <td
+                                          key={`review-row-${row.id}-${c.id}`}
+                                          className="border-b border-[rgb(var(--border))] px-3 py-2"
+                                        >
+                                          {row.extra?.[c.id] || "—"}
+                                        </td>
+                                      ))}
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          ) : (
+                            <div className="mt-3 text-sm text-[rgb(var(--muted))]">
+                              No medications in this system.
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+
+              <div className="mt-6 grid gap-4 sm:grid-cols-2">
+                <SummaryTile
+                  label="This review date"
+                  value={reviewDate || "—"}
+                />
+                <SummaryTile
+                  label="Review completed by"
+                  value={reviewCompletedBy || "—"}
+                />
+                <SummaryTile
+                  label="Next review date"
+                  value={nextReviewDate || "—"}
+                />
+                <SummaryTile label="Mode" value={nextReviewMode || "—"} />
+              </div>
+
+              <div className="mt-6">
+                <div className="text-sm font-semibold uppercase tracking-wide text-[rgb(var(--muted))]">
+                  Treatment goals
+                </div>
+                <div className="mt-2 whitespace-pre-wrap rounded-2xl border border-[rgb(var(--border))] bg-[rgba(var(--card),0.7)] p-4 text-sm">
+                  {treatmentGoals || "—"}
+                </div>
+              </div>
+
+              <div className="mt-6">
+                <div className="text-sm font-semibold uppercase tracking-wide text-[rgb(var(--muted))]">
+                  Before next review
+                </div>
+                <div className="mt-2 whitespace-pre-wrap rounded-2xl border border-[rgb(var(--border))] bg-[rgba(var(--card),0.7)] p-4 text-sm">
+                  {beforeNextReview || "—"}
+                </div>
+              </div>
+
+              <div className="mt-6">
+                <div className="text-sm font-semibold uppercase tracking-wide text-[rgb(var(--muted))]">
                   Notes
                 </div>
-
-                <textarea
-                  className="mt-3 w-full rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--card))] px-3 py-2 text-sm"
-                  rows={6}
-                  value={notes}
-                  onChange={(e) => setNotes(e.target.value)}
-                />
+                <div className="mt-2 whitespace-pre-wrap rounded-2xl border border-[rgb(var(--border))] bg-[rgba(var(--card),0.7)] p-4 text-sm">
+                  {notes || "—"}
+                </div>
               </div>
             </div>
-          )}
-        </div>
+          </section>
+        )}
+
+        {editorOpen && (
+          <EditorOverlay onClose={closeEditor}>
+            <div className="rounded-t-[28px] border border-[rgb(var(--border))] bg-[rgb(var(--surface))] p-5 md:rounded-[28px] md:p-6">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h2 className="text-xl font-semibold">
+                    {editorRowId ? "Edit medication" : "Add medication"}
+                  </h2>
+                  <p className="mt-1 text-sm text-[rgb(var(--muted))]">
+                    Fill the medication details cleanly. This is the part humans
+                    love making messy.
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={closeEditor}
+                  className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-2 text-sm font-semibold"
+                >
+                  Close
+                </button>
+              </div>
+
+              <div className="mt-5 grid gap-4 md:grid-cols-2">
+                <Field label="Medication" required>
+                  <FieldInput
+                    mode={inputMode}
+                    value={editorDraft.medication}
+                    onChange={(v) =>
+                      setEditorDraft((prev) => ({ ...prev, medication: v }))
+                    }
+                    options={
+                      getTemplateOptions(
+                        systemById.get(
+                          sections.find((s) => s.id === editorSectionId)
+                            ?.systemId || "",
+                        ),
+                        editorTemplateIndex,
+                      ).medication_options
+                    }
+                    placeholder="Medication"
+                    inputRef={refMed}
+                  />
+                </Field>
+
+                <Field label="Dose" required>
+                  <FieldInput
+                    mode={inputMode}
+                    value={editorDraft.dose}
+                    onChange={(v) =>
+                      setEditorDraft((prev) => ({ ...prev, dose: v }))
+                    }
+                    options={
+                      getTemplateOptions(
+                        systemById.get(
+                          sections.find((s) => s.id === editorSectionId)
+                            ?.systemId || "",
+                        ),
+                        editorTemplateIndex,
+                      ).dose_options
+                    }
+                    placeholder="Dose"
+                    inputRef={refDose}
+                  />
+                </Field>
+
+                <Field label="How" required>
+                  <FieldInput
+                    mode={inputMode}
+                    value={editorDraft.how}
+                    onChange={(v) =>
+                      setEditorDraft((prev) => ({ ...prev, how: v }))
+                    }
+                    options={
+                      getTemplateOptions(
+                        systemById.get(
+                          sections.find((s) => s.id === editorSectionId)
+                            ?.systemId || "",
+                        ),
+                        editorTemplateIndex,
+                      ).how_options
+                    }
+                    placeholder="How"
+                    inputRef={refHow}
+                  />
+                </Field>
+
+                <Field label="Purpose">
+                  <FieldInput
+                    mode={inputMode}
+                    value={editorDraft.purpose}
+                    onChange={(v) =>
+                      setEditorDraft((prev) => ({ ...prev, purpose: v }))
+                    }
+                    options={
+                      getTemplateOptions(
+                        systemById.get(
+                          sections.find((s) => s.id === editorSectionId)
+                            ?.systemId || "",
+                        ),
+                        editorTemplateIndex,
+                      ).purpose_options
+                    }
+                    placeholder="Purpose"
+                    inputRef={refPurpose}
+                  />
+                </Field>
+
+                <Field label="Plan" required>
+                  <FieldInput
+                    mode={inputMode}
+                    value={editorDraft.plan}
+                    onChange={(v) =>
+                      setEditorDraft((prev) => ({ ...prev, plan: v }))
+                    }
+                    options={
+                      getTemplateOptions(
+                        systemById.get(
+                          sections.find((s) => s.id === editorSectionId)
+                            ?.systemId || "",
+                        ),
+                        editorTemplateIndex,
+                      ).plan_options
+                    }
+                    placeholder="Plan"
+                    inputRef={refPlan}
+                  />
+                </Field>
+              </div>
+
+              {customColumns.length > 0 && (
+                <div className="mt-5 grid gap-4 md:grid-cols-2">
+                  {customColumns.map((c) => (
+                    <Field key={c.id} label={c.title}>
+                      <input
+                        value={editorDraft.extra?.[c.id] ?? ""}
+                        onChange={(e) =>
+                          setEditorDraft((prev) => ({
+                            ...prev,
+                            extra: { ...prev.extra, [c.id]: e.target.value },
+                          }))
+                        }
+                        className="field"
+                        placeholder={c.title}
+                      />
+                    </Field>
+                  ))}
+                </div>
+              )}
+
+              {(() => {
+                const currentSection = sections.find(
+                  (s) => s.id === editorSectionId,
+                );
+                const currentSystemId = currentSection?.systemId ?? "";
+                const favorites = favs[currentSystemId] ?? [];
+                const recent = recents[currentSystemId] ?? [];
+
+                if (favorites.length === 0 && recent.length === 0) return null;
+
+                return (
+                  <div className="mt-5 rounded-3xl border border-[rgb(var(--border))] bg-[rgba(var(--card),0.8)] p-4">
+                    {favorites.length > 0 && (
+                      <>
+                        <div className="text-xs font-semibold uppercase tracking-wide text-[rgb(var(--muted))]">
+                          Favorites
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {favorites.map((item) => (
+                            <button
+                              key={`fav-${item}`}
+                              type="button"
+                              onClick={() =>
+                                setEditorDraft((prev) => ({
+                                  ...prev,
+                                  medication: item,
+                                }))
+                              }
+                              className="rounded-full border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-1.5 text-sm"
+                            >
+                              {item}
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+
+                    {recent.length > 0 && (
+                      <>
+                        <div className="mt-4 text-xs font-semibold uppercase tracking-wide text-[rgb(var(--muted))]">
+                          Recent
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {recent.map((item) => (
+                            <button
+                              key={`recent-${item}`}
+                              type="button"
+                              onClick={() =>
+                                setEditorDraft((prev) => ({
+                                  ...prev,
+                                  medication: item,
+                                }))
+                              }
+                              className="rounded-full border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-1.5 text-sm"
+                            >
+                              {item}
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
+
+              <div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-between">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const section = sections.find(
+                      (s) => s.id === editorSectionId,
+                    );
+                    const systemId = section?.systemId ?? "";
+                    const med = editorDraft.medication.trim();
+                    if (systemId && med) toggleFav(systemId, med);
+                  }}
+                  className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-3 text-sm font-semibold text-[rgb(var(--text))]"
+                >
+                  Toggle favorite
+                </button>
+
+                <div className="flex flex-col-reverse gap-2 sm:flex-row">
+                  <button
+                    type="button"
+                    onClick={closeEditor}
+                    className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-3 text-sm font-semibold text-[rgb(var(--text))]"
+                  >
+                    Cancel
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={saveEditor}
+                    className="rounded-2xl bg-[rgb(var(--primary))] px-4 py-3 text-sm font-semibold text-white transition hover:opacity-90"
+                  >
+                    Save medication
+                  </button>
+                </div>
+              </div>
+            </div>
+          </EditorOverlay>
+        )}
+
+        {confirmResetOpen && (
+          <ConfirmDialog
+            title="Reset this draft?"
+            description="This clears the current report, medication sections, and saved local draft data."
+            confirmLabel="Reset"
+            cancelLabel="Cancel"
+            onCancel={() => setConfirmResetOpen(false)}
+            onConfirm={clearAll}
+          />
+        )}
+
+        {toast && (
+          <div className="fixed bottom-4 left-1/2 z-[80] w-[calc(100%-2rem)] max-w-xl -translate-x-1/2 rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-3 shadow-2xl">
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-sm font-medium text-[rgb(var(--text))]">
+                {toast.message}
+              </div>
+
+              {toast.onUndo && toast.undoLabel && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    toast.onUndo?.();
+                    setToast(null);
+                  }}
+                  className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-2 text-xs font-semibold"
+                >
+                  {toast.undoLabel}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
       </main>
 
-      {editorOpen && (
-        <EditorOverlay
-          onClose={closeEditor}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-              e.preventDefault();
-              saveEditor();
-              return;
-            }
+      <style jsx global>{`
+        .field {
+          width: 100%;
+          border-radius: 1rem;
+          border: 1px solid rgb(var(--border));
+          background: rgb(var(--surface));
+          padding: 0.75rem 1rem;
+          font-size: 0.95rem;
+          color: rgb(var(--text));
+          outline: none;
+          transition:
+            border-color 160ms ease,
+            box-shadow 160ms ease,
+            background 160ms ease;
+        }
 
-            if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
-              const el = document.activeElement as HTMLElement | null;
+        .field:focus {
+          border-color: rgb(var(--primary));
+          box-shadow: 0 0 0 4px rgba(var(--primary), 0.12);
+        }
 
-              const step = () => {
-                if (el === refMed.current) refDose.current?.focus();
-                else if (el === refDose.current) refHow.current?.focus();
-                else if (el === refHow.current) refPurpose.current?.focus();
-                else if (el === refPurpose.current) refPlan.current?.focus();
-              };
+        textarea.field {
+          resize: vertical;
+        }
 
-              const tag = (el?.tagName || "").toLowerCase();
-              if (tag === "input" || tag === "select") {
-                e.preventDefault();
-                step();
-              }
-            }
-          }}
-        >
-          <MedicationEditor
-            title={editorRowId ? "Edit Medication" : "Add Medication"}
-            inputMode={inputMode}
-            setInputMode={setInputMode}
-            dense={dense}
-            setDense={setDense}
-            systemName={
-              systemById.get(
-                sections.find((s) => s.id === editorSectionId)?.systemId ?? "",
-              )?.name ?? ""
-            }
-            systemId={
-              sections.find((s) => s.id === editorSectionId)?.systemId ?? ""
-            }
-            options={(() => {
-              const sec = sections.find((s) => s.id === editorSectionId);
-              if (!sec) {
-                return {
-                  medication_options: [],
-                  dose_options: [],
-                  how_options: [],
-                  purpose_options: [],
-                  plan_options: [],
-                } as RowTemplate;
-              }
-              return getOptions(sec.systemId, editorTemplateIndex);
-            })()}
-            customColumns={customColumns}
-            customSuggestions={customColumnSuggestions}
-            recents={recents}
-            favs={favs}
-            isFavorite={isFavorite}
-            toggleFavorite={toggleFavorite}
-            draft={editorDraft}
-            setDraft={setEditorDraft}
-            onSave={saveEditor}
-            onSaveAddAnother={saveAndAddAnother}
-            onCancel={closeEditor}
-            refs={{
-              med: refMed,
-              dose: refDose,
-              how: refHow,
-              purpose: refPurpose,
-              plan: refPlan,
-            }}
-          />
-        </EditorOverlay>
-      )}
-
-      {toast && (
-        <div className="no-print fixed bottom-4 left-1/2 z-50 -translate-x-1/2">
-          <div className="flex items-center gap-3 rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-3 shadow-[0_10px_30px_rgba(2,8,23,0.18)]">
-            <div className="text-sm">{toast.message}</div>
-
-            {toast.onUndo && (
-              <button
-                type="button"
-                onClick={() => {
-                  toast.onUndo?.();
-                  setToast(null);
-                }}
-                className="rounded-xl bg-[rgb(var(--primary))] px-3 py-2 text-xs font-semibold text-white"
-              >
-                {toast.undoLabel ?? "Undo"}
-              </button>
-            )}
-
-            <button
-              type="button"
-              onClick={() => setToast(null)}
-              className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-2 text-xs font-semibold"
-            >
-              Close
-            </button>
-          </div>
-        </div>
-      )}
+        @media print {
+          .print\\:shadow-none {
+            box-shadow: none !important;
+          }
+        }
+      `}</style>
     </div>
   );
 }
 
-/* ===================== UI Components ===================== */
+function rowIncomplete(row: MedicationRow) {
+  return (
+    !row.medication.trim() ||
+    !row.dose.trim() ||
+    !row.how.trim() ||
+    !row.plan.trim()
+  );
+}
 
-function TabButton({
-  active,
-  onClick,
+function getTemplateOptions(
+  system?: SystemTemplate,
+  templateIndex?: number,
+): RowTemplate {
+  const empty: RowTemplate = {
+    medication_options: [],
+    dose_options: [],
+    how_options: [],
+    purpose_options: [],
+    plan_options: [],
+  };
+
+  if (!system) return empty;
+
+  if (typeof templateIndex === "number") {
+    return system.row_templates?.[templateIndex] ?? empty;
+  }
+
+  const merged: RowTemplate = {
+    medication_options: [],
+    dose_options: [],
+    how_options: [],
+    purpose_options: [],
+    plan_options: [],
+  };
+
+  for (const t of system.row_templates ?? []) {
+    merged.medication_options.push(...(t.medication_options ?? []));
+    merged.dose_options.push(...(t.dose_options ?? []));
+    merged.how_options.push(...(t.how_options ?? []));
+    merged.purpose_options.push(...(t.purpose_options ?? []));
+    merged.plan_options.push(...(t.plan_options ?? []));
+  }
+
+  return {
+    medication_options: Array.from(new Set(merged.medication_options)),
+    dose_options: Array.from(new Set(merged.dose_options)),
+    how_options: Array.from(new Set(merged.how_options)),
+    purpose_options: Array.from(new Set(merged.purpose_options)),
+    plan_options: Array.from(new Set(merged.plan_options)),
+  };
+}
+
+function Field({
+  label,
+  required,
   children,
 }: {
-  active: boolean;
-  onClick: () => void;
+  label: string;
+  required?: boolean;
   children: React.ReactNode;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={[
-        "rounded-xl border px-4 py-2 text-sm font-semibold",
-        active
-          ? "border-[rgb(var(--primary))] bg-[rgb(var(--primary))] text-white"
-          : "border-[rgb(var(--border))] bg-[rgb(var(--surface))] text-[rgb(var(--muted))]",
-      ].join(" ")}
-    >
-      {children}
-    </button>
-  );
-}
-
-function Card({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <section className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] p-4">
-      <div className="mb-3 flex items-center gap-2">
-        <div className="h-2 w-2 rounded-full bg-[rgb(var(--primary))]" />
-        <div className="text-sm font-bold uppercase tracking-wide text-[rgb(var(--muted))]">
-          {title}
-        </div>
-      </div>
-      {children}
-    </section>
-  );
-}
-
-function Grid2({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">{children}</div>
-  );
-}
-
-function LabeledInput({
-  label,
-  value,
-  onChange,
-  placeholder,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-}) {
-  return (
     <div>
-      <label className="mb-1 block text-sm font-semibold">{label}</label>
-      <input
-        className="w-full rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--card))] px-3 py-2 text-sm"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-      />
-    </div>
-  );
-}
-
-function LabeledDate({
-  label,
-  value,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-}) {
-  return (
-    <div>
-      <label className="mb-1 block text-sm font-semibold">{label}</label>
-      <input
-        className="w-full rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--card))] px-3 py-2 text-sm"
-        type="date"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-      />
+      <label className="mb-2 block text-sm font-semibold text-[rgb(var(--text))]">
+        {label}
+        {required && <span className="ml-1 text-[rgb(var(--danger))]">*</span>}
+      </label>
+      {children}
     </div>
   );
 }
@@ -2082,17 +2298,16 @@ function Segmented<T extends string>({
     <div className="inline-flex overflow-hidden rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))]">
       {options.map((o) => {
         const active = o.value === value;
-
         return (
           <button
             key={o.value}
             type="button"
             onClick={() => onChange(o.value)}
             className={[
-              "px-3 py-2 text-sm font-semibold",
+              "px-3 py-2 text-sm font-semibold transition",
               active
                 ? "bg-[rgb(var(--primary))] text-white"
-                : "bg-transparent text-[rgb(var(--muted))] hover:bg-[rgba(var(--surface),0.7)]",
+                : "text-[rgb(var(--muted))] hover:bg-[rgba(var(--card),0.75)]",
             ].join(" ")}
           >
             {o.label}
@@ -2119,22 +2334,22 @@ function Toggle({
       className={[
         "inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm font-semibold",
         checked
-          ? "border-[rgb(var(--border))] bg-[rgba(var(--primary),0.10)] text-[rgb(var(--text))]"
+          ? "border-[rgb(var(--primary))] bg-[rgba(var(--primary),0.08)] text-[rgb(var(--text))]"
           : "border-[rgb(var(--border))] bg-[rgb(var(--surface))] text-[rgb(var(--muted))]",
       ].join(" ")}
       aria-pressed={checked}
     >
       <span
         className={[
-          "relative h-4 w-7 rounded-full border",
+          "relative h-4 w-7 rounded-full border transition",
           checked
-            ? "border-[rgba(var(--primary),0.35)] bg-[rgba(var(--primary),0.25)]"
-            : "border-[rgb(var(--border))] bg-[rgb(var(--card))]",
+            ? "border-[rgba(var(--primary),0.35)] bg-[rgba(var(--primary),0.20)]"
+            : "border-[rgb(var(--border))] bg-[rgba(var(--card),0.9)]",
         ].join(" ")}
       >
         <span
           className={[
-            "absolute top-1/2 h-3 w-3 -translate-y-1/2 rounded-full",
+            "absolute top-1/2 h-3 w-3 -translate-y-1/2 rounded-full transition-all",
             checked
               ? "left-3 bg-[rgb(var(--primary))]"
               : "left-1 bg-[rgb(var(--muted))]",
@@ -2146,14 +2361,68 @@ function Toggle({
   );
 }
 
+function SummaryTile({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-2xl border border-[rgb(var(--border))] bg-[rgba(var(--card),0.75)] p-4">
+      <div className="text-xs font-semibold uppercase tracking-wide text-[rgb(var(--muted))]">
+        {label}
+      </div>
+      <div className="mt-2 whitespace-pre-wrap text-sm font-semibold text-[rgb(var(--text))]">
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function ConfirmDialog({
+  title,
+  description,
+  confirmLabel,
+  cancelLabel,
+  onConfirm,
+  onCancel,
+}: {
+  title: string;
+  description: string;
+  confirmLabel: string;
+  cancelLabel: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/45 px-4">
+      <div className="w-full max-w-md rounded-3xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] p-5 shadow-2xl">
+        <div className="text-lg font-semibold">{title}</div>
+        <p className="mt-2 text-sm leading-6 text-[rgb(var(--muted))]">
+          {description}
+        </p>
+        <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-2 text-sm font-semibold"
+          >
+            {cancelLabel}
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            className="rounded-xl bg-[rgb(var(--primary))] px-4 py-2 text-sm font-semibold text-white"
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function EditorOverlay({
   children,
   onClose,
-  onKeyDown,
 }: {
   children: React.ReactNode;
   onClose: () => void;
-  onKeyDown?: (e: React.KeyboardEvent<HTMLDivElement>) => void;
 }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -2165,7 +2434,7 @@ function EditorOverlay({
   }, [onClose]);
 
   return (
-    <div className="fixed inset-0 z-50" onKeyDown={onKeyDown}>
+    <div className="fixed inset-0 z-50">
       <button
         type="button"
         className="absolute inset-0 bg-black/40"
@@ -2174,9 +2443,7 @@ function EditorOverlay({
       />
 
       <div className="absolute inset-x-0 bottom-0 md:inset-0 md:flex md:items-center md:justify-center">
-        <div className="w-full md:max-w-2xl md:rounded-2xl md:shadow-[0_20px_60px_rgba(0,0,0,0.25)]">
-          {children}
-        </div>
+        <div className="w-full md:max-w-3xl">{children}</div>
       </div>
     </div>
   );
@@ -2231,7 +2498,7 @@ function SmartSelect({
             ).current = el;
           }
         }}
-        className="w-full rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--card))] px-3 py-2 text-sm disabled:opacity-60"
+        className="field"
         value={q}
         onChange={(e) => {
           setQ(e.target.value);
@@ -2271,7 +2538,6 @@ function FieldInput({
   options,
   placeholder,
   disabled,
-  preferSmartDropdown,
   inputRef,
 }: {
   mode: InputMode;
@@ -2280,12 +2546,8 @@ function FieldInput({
   options: string[];
   placeholder: string;
   disabled?: boolean;
-  preferSmartDropdown?: boolean;
   inputRef?: React.RefObject<HTMLInputElement | HTMLSelectElement | null>;
 }) {
-  const baseClass =
-    "w-full rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--card))] px-3 py-2 text-sm disabled:opacity-60";
-
   if (mode === "pick" && options.length > 0) {
     const hasCustom =
       value && !options.some((x) => x.toLowerCase() === value.toLowerCase());
@@ -2301,7 +2563,7 @@ function FieldInput({
             ).current = el;
           }
         }}
-        className={baseClass}
+        className="field"
         value={value}
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled}
@@ -2317,7 +2579,7 @@ function FieldInput({
     );
   }
 
-  if (mode === "smart" && options.length > 0 && preferSmartDropdown) {
+  if (mode === "smart" && options.length > 0) {
     return (
       <SmartSelect
         value={value}
@@ -2341,305 +2603,11 @@ function FieldInput({
           ).current = el;
         }
       }}
-      className={baseClass}
+      className="field"
       value={value}
       onChange={(e) => onChange(e.target.value)}
       placeholder={placeholder}
       disabled={disabled}
     />
-  );
-}
-
-function MedicationEditor({
-  title,
-  inputMode,
-  setInputMode,
-  dense,
-  setDense,
-  systemName,
-  systemId,
-  options,
-  customColumns,
-  customSuggestions,
-  recents,
-  favs,
-  isFavorite,
-  toggleFavorite,
-  draft,
-  setDraft,
-  onSave,
-  onSaveAddAnother,
-  onCancel,
-  refs,
-}: {
-  title: string;
-  inputMode: InputMode;
-  setInputMode: (m: InputMode) => void;
-  dense: boolean;
-  setDense: (v: boolean) => void;
-  systemName: string;
-  systemId: string;
-  options: RowTemplate;
-  customColumns: CustomColumn[];
-  customSuggestions: Record<string, string[]>;
-  recents: MapList;
-  favs: MapList;
-  isFavorite: (systemId: string, med: string) => boolean;
-  toggleFavorite: (systemId: string, med: string) => void;
-  draft: MedicationRow;
-  setDraft: (r: MedicationRow) => void;
-  onSave: () => void;
-  onSaveAddAnother: () => void;
-  onCancel: () => void;
-  refs: {
-    med: React.RefObject<HTMLInputElement | HTMLSelectElement | null>;
-    dose: React.RefObject<HTMLInputElement | HTMLSelectElement | null>;
-    how: React.RefObject<HTMLInputElement | HTMLSelectElement | null>;
-    purpose: React.RefObject<HTMLInputElement | HTMLSelectElement | null>;
-    plan: React.RefObject<HTMLInputElement | HTMLSelectElement | null>;
-  };
-}) {
-  const pad = dense ? "p-4" : "p-5";
-
-  const recentList = recents[systemId] ?? [];
-  const favList = favs[systemId] ?? [];
-
-  return (
-    <div
-      className={[
-        "border border-[rgb(var(--border))] bg-[rgb(var(--surface))] md:rounded-2xl",
-        pad,
-      ].join(" ")}
-    >
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <div className="text-lg font-bold">{title}</div>
-          <div className="text-xs text-[rgb(var(--muted))]">
-            {systemName ? `System: ${systemName}` : "System"}
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <Toggle checked={dense} onChange={setDense} label="Compact" />
-          <button
-            type="button"
-            onClick={onCancel}
-            className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-2 text-sm font-semibold"
-          >
-            Close
-          </button>
-        </div>
-      </div>
-
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <div className="text-xs font-bold uppercase tracking-wide text-[rgb(var(--muted))]">
-          Input mode
-        </div>
-
-        <Segmented
-          value={inputMode}
-          onChange={setInputMode}
-          options={[
-            { value: "smart", label: "Smart" },
-            { value: "pick", label: "Pick" },
-            { value: "type", label: "Type" },
-          ]}
-        />
-      </div>
-
-      {(favList.length > 0 || recentList.length > 0) && (
-        <div className="mt-4 rounded-2xl border border-[rgb(var(--border))] bg-[rgba(var(--card),0.55)] p-4">
-          {favList.length > 0 && (
-            <>
-              <div className="text-xs font-bold uppercase tracking-wide text-[rgb(var(--muted))]">
-                Favorites
-              </div>
-
-              <div className="mt-2 flex flex-wrap gap-2">
-                {favList.slice(0, 10).map((m) => (
-                  <button
-                    key={m}
-                    type="button"
-                    className="rounded-full border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-1 text-xs font-semibold"
-                    onClick={() => setDraft({ ...draft, medication: m })}
-                  >
-                    {m}
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
-
-          {recentList.length > 0 && (
-            <>
-              <div className="mt-4 text-xs font-bold uppercase tracking-wide text-[rgb(var(--muted))]">
-                Recent
-              </div>
-
-              <div className="mt-2 flex flex-wrap gap-2">
-                {recentList.slice(0, 10).map((m) => (
-                  <button
-                    key={m}
-                    type="button"
-                    className="rounded-full border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-1 text-xs font-semibold"
-                    onClick={() => setDraft({ ...draft, medication: m })}
-                  >
-                    {m}
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
-        </div>
-      )}
-
-      <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <div>
-          <div className="flex items-center justify-between">
-            <label className="mb-1 block text-sm font-semibold">
-              Medication
-            </label>
-
-            <button
-              type="button"
-              className="rounded-full border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-1 text-xs font-semibold"
-              onClick={() => toggleFavorite(systemId, draft.medication)}
-              title="Toggle favorite"
-            >
-              {isFavorite(systemId, draft.medication)
-                ? "★ Favorite"
-                : "☆ Favorite"}
-            </button>
-          </div>
-
-          <FieldInput
-            mode={inputMode}
-            value={draft.medication}
-            onChange={(v) => setDraft({ ...draft, medication: v })}
-            options={options.medication_options}
-            placeholder="Medication..."
-            disabled={false}
-            preferSmartDropdown
-            inputRef={refs.med}
-          />
-        </div>
-
-        <div>
-          <label className="mb-1 block text-sm font-semibold">Dose</label>
-          <FieldInput
-            mode={inputMode}
-            value={draft.dose}
-            onChange={(v) => setDraft({ ...draft, dose: v })}
-            options={options.dose_options}
-            placeholder="Dose..."
-            disabled={false}
-            preferSmartDropdown
-            inputRef={refs.dose}
-          />
-        </div>
-
-        <div>
-          <label className="mb-1 block text-sm font-semibold">How</label>
-          <FieldInput
-            mode={inputMode}
-            value={draft.how}
-            onChange={(v) => setDraft({ ...draft, how: v })}
-            options={options.how_options}
-            placeholder="How..."
-            disabled={false}
-            preferSmartDropdown
-            inputRef={refs.how}
-          />
-        </div>
-
-        <div>
-          <label className="mb-1 block text-sm font-semibold">Purpose</label>
-          <FieldInput
-            mode={inputMode}
-            value={draft.purpose}
-            onChange={(v) => setDraft({ ...draft, purpose: v })}
-            options={options.purpose_options}
-            placeholder="Purpose..."
-            disabled={false}
-            preferSmartDropdown
-            inputRef={refs.purpose}
-          />
-        </div>
-
-        <div className="sm:col-span-2">
-          <label className="mb-1 block text-sm font-semibold">Plan</label>
-          <FieldInput
-            mode={inputMode}
-            value={draft.plan}
-            onChange={(v) => setDraft({ ...draft, plan: v })}
-            options={options.plan_options}
-            placeholder="Plan..."
-            disabled={false}
-            preferSmartDropdown
-            inputRef={refs.plan}
-          />
-        </div>
-      </div>
-
-      {customColumns.length > 0 && (
-        <div className="mt-4 rounded-2xl border border-[rgb(var(--border))] bg-[rgba(var(--card),0.55)] p-4">
-          <div className="text-xs font-bold uppercase tracking-wide text-[rgb(var(--muted))]">
-            Custom Fields
-          </div>
-
-          <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-            {customColumns.map((c) => (
-              <div key={c.id}>
-                <label className="mb-1 block text-sm font-semibold">
-                  {c.title}
-                </label>
-
-                <FieldInput
-                  mode={inputMode}
-                  value={draft.extra?.[c.id] ?? ""}
-                  onChange={(v) =>
-                    setDraft({
-                      ...draft,
-                      extra: { ...(draft.extra ?? {}), [c.id]: v },
-                    })
-                  }
-                  options={customSuggestions[c.id] ?? []}
-                  placeholder={`${c.title}...`}
-                  disabled={false}
-                  preferSmartDropdown
-                />
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-end">
-        <button
-          type="button"
-          onClick={onCancel}
-          className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-2 text-sm font-semibold"
-        >
-          Cancel
-        </button>
-
-        <button
-          type="button"
-          onClick={onSaveAddAnother}
-          className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-2 text-sm font-semibold"
-          title="Save then keep adding meds"
-        >
-          Save & Add another
-        </button>
-
-        <button
-          type="button"
-          onClick={onSave}
-          className="rounded-xl bg-[rgb(var(--primary))] px-5 py-2 text-sm font-semibold text-white"
-        >
-          Save
-        </button>
-      </div>
-    </div>
   );
 }
