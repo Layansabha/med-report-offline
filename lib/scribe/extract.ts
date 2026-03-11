@@ -1,16 +1,15 @@
 import fs from "fs/promises";
 import path from "path";
-
 export type ScribeMedication = {
   systemId: string;
   diagnosis: string;
+  rawMedication: string;
   medication: string;
   dose: string;
   how: string;
   purpose: string;
   plan: string;
 };
-
 export type StructuredDraft = {
   transcript: string;
   patientName: string;
@@ -27,33 +26,18 @@ export type StructuredDraft = {
   medications: ScribeMedication[];
   warnings: string[];
 };
-
 type StructuredPayload = Omit<StructuredDraft, "transcript">;
-
-type SystemCatalogEntry = {
-  id: string;
-  name: string;
-  diagnosis?: string;
-};
-
+type SystemCatalogEntry = { id: string; name: string; diagnosis?: string };
 type GroqChatCompletionResponse = {
-  choices?: Array<{
-    message?: {
-      content?: string;
-    };
-  }>;
+  choices?: Array<{ message?: { content?: string } }>;
 };
-
 const GROQ_BASE_URL =
   process.env.GROQ_BASE_URL || "https://api.groq.com/openai/v1";
-
 const DEFAULT_TEXT_MODEL = process.env.GROQ_TEXT_MODEL || "openai/gpt-oss-20b";
-
 const STRICT_SCHEMA_MODELS = new Set([
   "openai/gpt-oss-20b",
   "openai/gpt-oss-120b",
 ]);
-
 const BEST_EFFORT_SCHEMA_MODELS = new Set([
   "openai/gpt-oss-20b",
   "openai/gpt-oss-120b",
@@ -61,33 +45,25 @@ const BEST_EFFORT_SCHEMA_MODELS = new Set([
   "meta-llama/llama-4-scout-17b-16e-instruct",
   "meta-llama/llama-4-maverick-17b-128e-instruct",
 ]);
-
 function compactText(input: string) {
   return (input || "").replace(/\s+/g, " ").trim();
 }
-
 function safeString(value: unknown) {
   return typeof value === "string" ? compactText(value) : "";
 }
-
 function dedupeStrings(values: string[]) {
   const seen = new Set<string>();
   const out: string[] = [];
-
   for (const item of values) {
     const value = compactText(item);
     if (!value) continue;
-
     const key = value.toLowerCase();
     if (seen.has(key)) continue;
-
     seen.add(key);
     out.push(value);
   }
-
   return out;
 }
-
 function cleanJsonText(text: string) {
   return text
     .trim()
@@ -96,19 +72,15 @@ function cleanJsonText(text: string) {
     .replace(/\s*```$/i, "")
     .trim();
 }
-
 function extractJsonObject(text: string) {
   const cleaned = cleanJsonText(text);
   const first = cleaned.indexOf("{");
   const last = cleaned.lastIndexOf("}");
-
   if (first !== -1 && last !== -1 && last > first) {
     return cleaned.slice(first, last + 1);
   }
-
   return cleaned;
 }
-
 function safeParseJson<T>(text: string): T | null {
   try {
     return JSON.parse(cleanJsonText(text)) as T;
@@ -120,28 +92,29 @@ function safeParseJson<T>(text: string): T | null {
     }
   }
 }
-
 function normalizeForMatch(input: string) {
   return safeString(input).toLowerCase();
 }
-
 function normalizeMedication(value: unknown): ScribeMedication {
   const medication = (value ?? {}) as Record<string, unknown>;
-
+  const rawMedication = safeString(
+    medication.rawMedication || medication.medication,
+  );
+  const normalizedMedication =
+    safeString(medication.medication) || rawMedication;
   return {
     systemId: safeString(medication.systemId),
     diagnosis: safeString(medication.diagnosis),
-    medication: safeString(medication.medication),
+    rawMedication,
+    medication: normalizedMedication,
     dose: safeString(medication.dose),
     how: safeString(medication.how),
     purpose: safeString(medication.purpose),
     plan: safeString(medication.plan),
   };
 }
-
 function normalizeStructuredPayload(value: unknown): StructuredPayload {
   const payload = (value ?? {}) as Record<string, unknown>;
-
   return {
     patientName: safeString(payload.patientName),
     caseNumber: safeString(payload.caseNumber),
@@ -163,24 +136,21 @@ function normalizeStructuredPayload(value: unknown): StructuredPayload {
     medications: Array.isArray(payload.medications)
       ? payload.medications
           .map(normalizeMedication)
-          .filter((item) => item.medication)
+          .filter((item) => item.rawMedication || item.medication)
       : [],
     warnings: Array.isArray(payload.warnings)
       ? dedupeStrings(payload.warnings.map((item) => safeString(item)))
       : [],
   };
 }
-
 async function loadSystemCatalog(): Promise<SystemCatalogEntry[]> {
   try {
     const systemsPath = path.join(process.cwd(), "public", "systems.json");
     const raw = await fs.readFile(systemsPath, "utf8");
     const parsed = JSON.parse(raw);
-
     if (!Array.isArray(parsed)) {
       return [];
     }
-
     return parsed.map((item: Record<string, unknown>) => ({
       id: safeString(item?.id),
       name: safeString(item?.name),
@@ -190,7 +160,6 @@ async function loadSystemCatalog(): Promise<SystemCatalogEntry[]> {
     return [];
   }
 }
-
 function mapMedicationToSystem(
   medication: ScribeMedication,
   systemCatalog: SystemCatalogEntry[],
@@ -198,16 +167,13 @@ function mapMedicationToSystem(
   if (medication.systemId) {
     return medication;
   }
-
   const diagnosisNorm = normalizeForMatch(medication.diagnosis);
   if (!diagnosisNorm) {
     return medication;
   }
-
   const matched = systemCatalog.find((system) => {
     const diagnosisName = normalizeForMatch(system.diagnosis || "");
     const systemName = normalizeForMatch(system.name || "");
-
     return (
       diagnosisNorm === diagnosisName ||
       diagnosisNorm === systemName ||
@@ -215,18 +181,15 @@ function mapMedicationToSystem(
       systemName.includes(diagnosisNorm)
     );
   });
-
   if (!matched) {
     return medication;
   }
-
   return {
     ...medication,
     systemId: matched.id,
     diagnosis: medication.diagnosis || matched.diagnosis || matched.name || "",
   };
 }
-
 function buildSchema() {
   return {
     type: "object",
@@ -238,17 +201,11 @@ function buildSchema() {
       sex: { type: "string" },
       chiefComplaint: { type: "string" },
       significantHistory: { type: "string" },
-      associatedSymptoms: {
-        type: "array",
-        items: { type: "string" },
-      },
+      associatedSymptoms: { type: "array", items: { type: "string" } },
       examFindings: { type: "string" },
       labSummary: { type: "string" },
       imagingSummary: { type: "string" },
-      diagnosisHints: {
-        type: "array",
-        items: { type: "string" },
-      },
+      diagnosisHints: { type: "array", items: { type: "string" } },
       medications: {
         type: "array",
         items: {
@@ -257,6 +214,7 @@ function buildSchema() {
           properties: {
             systemId: { type: "string" },
             diagnosis: { type: "string" },
+            rawMedication: { type: "string" },
             medication: { type: "string" },
             dose: { type: "string" },
             how: { type: "string" },
@@ -266,6 +224,7 @@ function buildSchema() {
           required: [
             "systemId",
             "diagnosis",
+            "rawMedication",
             "medication",
             "dose",
             "how",
@@ -274,10 +233,7 @@ function buildSchema() {
           ],
         },
       },
-      warnings: {
-        type: "array",
-        items: { type: "string" },
-      },
+      warnings: { type: "array", items: { type: "string" } },
     },
     required: [
       "patientName",
@@ -296,7 +252,6 @@ function buildSchema() {
     ],
   };
 }
-
 function buildResponseFormat(
   model: string,
   schema: ReturnType<typeof buildSchema>,
@@ -304,30 +259,17 @@ function buildResponseFormat(
   if (STRICT_SCHEMA_MODELS.has(model)) {
     return {
       type: "json_schema",
-      json_schema: {
-        name: "medical_scribe_draft",
-        strict: true,
-        schema,
-      },
+      json_schema: { name: "medical_scribe_draft", strict: true, schema },
     };
   }
-
   if (BEST_EFFORT_SCHEMA_MODELS.has(model)) {
     return {
       type: "json_schema",
-      json_schema: {
-        name: "medical_scribe_draft",
-        strict: false,
-        schema,
-      },
+      json_schema: { name: "medical_scribe_draft", strict: false, schema },
     };
   }
-
-  return {
-    type: "json_object",
-  };
+  return { type: "json_object" };
 }
-
 function buildPrompts(
   transcript: string,
   systemCatalog: SystemCatalogEntry[],
@@ -341,16 +283,17 @@ function buildPrompts(
         )
         .join("\n")
     : "No systems catalog provided.";
-
   const medicationHints = process.env.GROQ_MEDICATION_HINTS?.trim() || "";
-
   const systemPrompt = [
     "You are a medical scribe extraction engine.",
     "Convert a clinical transcript into structured JSON.",
     "The transcript may contain mixed Arabic and English speech.",
     "Return JSON only.",
     "Use English for general note fields whenever reasonably possible.",
-    "For medication names, keep the original spoken medication name if you are not fully confident in standardizing it.",
+    "For every explicitly mentioned medication, always return both rawMedication and medication.",
+    "rawMedication must contain the medication name exactly as it appears in the transcript.",
+    "medication must contain the best normalized English medication name when you are reasonably confident.",
+    "If you are not confident about the standardized English medication name, copy rawMedication into medication exactly and do not omit the drug.",
     "If a medication is explicitly mentioned, include it in the medications array even if dose/how/purpose/plan are missing.",
     "If dose/how/purpose/plan are missing, return empty strings for those fields.",
     "Do not omit an explicitly mentioned medicine just because the instruction is incomplete.",
@@ -366,7 +309,6 @@ function buildPrompts(
         : [],
     )
     .join(" ");
-
   const userPrompt = [
     "Schema:",
     JSON.stringify(schema),
@@ -377,10 +319,8 @@ function buildPrompts(
     "Transcript:",
     transcript,
   ].join("\n");
-
   return { systemPrompt, userPrompt };
 }
-
 async function requestGroqExtraction(params: {
   model: string;
   systemPrompt: string;
@@ -391,10 +331,8 @@ async function requestGroqExtraction(params: {
   if (!apiKey) {
     throw new Error("Missing GROQ_API_KEY.");
   }
-
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 45000);
-
   try {
     const res = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
       method: "POST",
@@ -413,26 +351,20 @@ async function requestGroqExtraction(params: {
         response_format: params.responseFormat,
       }),
     });
-
     const raw = await res.text();
-
     if (!res.ok) {
       throw new Error(`Groq extraction failed: ${res.status} ${raw}`);
     }
-
     const parsed = safeParseJson<GroqChatCompletionResponse>(raw);
     const content = parsed?.choices?.[0]?.message?.content;
-
     if (typeof content !== "string" || !content.trim()) {
       throw new Error("Groq returned empty extraction content.");
     }
-
     return content;
   } finally {
     clearTimeout(timeout);
   }
 }
-
 async function callGroqExtraction(
   transcript: string,
   systemCatalog: SystemCatalogEntry[],
@@ -444,18 +376,14 @@ async function callGroqExtraction(
     systemCatalog,
     schema,
   );
-
   const primaryResponseFormat = buildResponseFormat(model, schema);
-
   let content = await requestGroqExtraction({
     model,
     systemPrompt,
     userPrompt,
     responseFormat: primaryResponseFormat,
   });
-
   let parsed = safeParseJson<StructuredPayload>(content);
-
   if (!parsed && primaryResponseFormat.type !== "json_object") {
     content = await requestGroqExtraction({
       model,
@@ -463,24 +391,19 @@ async function callGroqExtraction(
       userPrompt,
       responseFormat: { type: "json_object" },
     });
-
     parsed = safeParseJson<StructuredPayload>(content);
   }
-
   if (!parsed) {
     throw new Error(
       `Failed to parse structured JSON from model output: ${content}`,
     );
   }
-
   return normalizeStructuredPayload(parsed);
 }
-
 export async function extractStructuredDraft(
   rawTranscript: string,
 ): Promise<StructuredDraft> {
   const transcript = compactText(rawTranscript);
-
   if (!transcript) {
     return {
       transcript: "",
@@ -499,14 +422,11 @@ export async function extractStructuredDraft(
       warnings: ["No transcript detected."],
     };
   }
-
   const systemCatalog = await loadSystemCatalog();
   const structured = await callGroqExtraction(transcript, systemCatalog);
-
   const medications = structured.medications.map((item) =>
     mapMedicationToSystem(item, systemCatalog),
   );
-
   return {
     transcript,
     patientName: structured.patientName,

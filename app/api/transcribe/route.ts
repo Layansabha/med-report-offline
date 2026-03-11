@@ -4,11 +4,10 @@ export const runtime = "nodejs";
 
 const GROQ_BASE_URL =
   process.env.GROQ_BASE_URL || "https://api.groq.com/openai/v1";
+const GROQ_TRANSCRIBE_URL = `${GROQ_BASE_URL}/audio/transcriptions`;
 const MAX_FREE_TIER_BYTES = 25 * 1024 * 1024;
 
-type AudioMode = "transcribe" | "translate";
-
-type GroqAudioResponse = {
+type GroqTranscriptionResponse = {
   text?: string;
   language?: string;
   duration?: number;
@@ -24,10 +23,6 @@ function tryParseJson<T>(text: string): T | null {
   } catch {
     return null;
   }
-}
-
-function resolveAudioMode(value: unknown): AudioMode {
-  return value === "translate" ? "translate" : "transcribe";
 }
 
 export async function POST(req: Request) {
@@ -67,40 +62,19 @@ export async function POST(req: Request) {
       );
     }
 
-    const requestedModeRaw = incoming.get("mode");
-    const envModeRaw = process.env.GROQ_AUDIO_MODE;
-    const mode = resolveAudioMode(requestedModeRaw || envModeRaw);
-
-    const endpoint =
-      mode === "translate"
-        ? `${GROQ_BASE_URL}/audio/translations`
-        : `${GROQ_BASE_URL}/audio/transcriptions`;
-
-    const model =
-      mode === "translate"
-        ? "whisper-large-v3"
-        : process.env.GROQ_TRANSCRIBE_MODEL || "whisper-large-v3";
-
+    const model = process.env.GROQ_TRANSCRIBE_MODEL || "whisper-large-v3";
     const spellingHints = process.env.GROQ_TRANSCRIBE_HINTS?.trim() || "";
 
-    const transcribePrompt = [
-      "النص عبارة عن إملاء طبي مختلط عربي وإنجليزي.",
-      "اكتب الكلام العربي بحروف عربية، وليس Arabizi.",
+    const prompt = [
+      "This is mixed Arabic and English medical dictation.",
+      "Write spoken Arabic in Arabic script, not Arabizi.",
       "Keep spoken English medical words in English.",
-      "Preserve medication names, dosages, abbreviations, case numbers, and ages exactly as spoken.",
-      "Do not omit drug names even if they appear inside Arabic speech.",
-      "Do not invent words that are not in the audio.",
-    ]
-      .concat(spellingHints ? [`Important spellings: ${spellingHints}`] : [])
-      .join(" ");
-
-    const translatePrompt = [
-      "Translate the spoken audio into clear English medical text.",
-      "Preserve medication names, dosages, abbreviations, ages, and case numbers accurately.",
+      "Preserve medication names, dosages, diagnoses, abbreviations, ages, and case numbers exactly as spoken.",
       "Do not omit drug names.",
-      "Do not invent facts.",
+      "Do not invent words that are not in the audio.",
+      spellingHints ? `Important spellings: ${spellingHints}` : "",
     ]
-      .concat(spellingHints ? [`Important spellings: ${spellingHints}`] : [])
+      .filter(Boolean)
       .join(" ");
 
     const groqForm = new FormData();
@@ -108,18 +82,10 @@ export async function POST(req: Request) {
     groqForm.append("model", model);
     groqForm.append("response_format", "verbose_json");
     groqForm.append("temperature", "0");
-    groqForm.append(
-      "prompt",
-      mode === "translate" ? translatePrompt : transcribePrompt,
-    );
+    groqForm.append("prompt", prompt);
     groqForm.append("timestamp_granularities[]", "segment");
 
-    // For translation endpoint, Groq docs indicate English output.
-    if (mode === "translate") {
-      groqForm.append("language", "en");
-    }
-
-    const groqRes = await fetch(endpoint, {
+    const groqRes = await fetch(GROQ_TRANSCRIBE_URL, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
@@ -128,15 +94,12 @@ export async function POST(req: Request) {
     });
 
     const rawText = await groqRes.text();
-    const parsed = tryParseJson<GroqAudioResponse>(rawText);
+    const parsed = tryParseJson<GroqTranscriptionResponse>(rawText);
 
     if (!groqRes.ok) {
       return NextResponse.json(
         {
-          error:
-            parsed?.error?.message ||
-            rawText ||
-            `${mode === "translate" ? "Translation" : "Transcription"} failed.`,
+          error: parsed?.error?.message || rawText || "Transcription failed.",
         },
         { status: groqRes.status },
       );
@@ -144,14 +107,9 @@ export async function POST(req: Request) {
 
     const text = typeof parsed?.text === "string" ? parsed.text.trim() : "";
     const language =
-      typeof parsed?.language === "string"
-        ? parsed.language
-        : mode === "translate"
-          ? "en"
-          : "";
+      typeof parsed?.language === "string" ? parsed.language : "";
 
     return NextResponse.json({
-      mode,
       text,
       language,
       duration: typeof parsed?.duration === "number" ? parsed.duration : null,
@@ -164,7 +122,7 @@ export async function POST(req: Request) {
         error:
           error instanceof Error
             ? error.message
-            : "Unexpected audio processing error.",
+            : "Unexpected transcription error.",
       },
       { status: 500 },
     );
