@@ -36,6 +36,14 @@ type SystemCatalogEntry = {
   diagnosis?: string;
 };
 
+type GroqChatCompletionResponse = {
+  choices?: Array<{
+    message?: {
+      content?: string;
+    };
+  }>;
+};
+
 const GROQ_BASE_URL =
   process.env.GROQ_BASE_URL || "https://api.groq.com/openai/v1";
 const DEFAULT_TEXT_MODEL = process.env.GROQ_TEXT_MODEL || "openai/gpt-oss-20b";
@@ -606,7 +614,7 @@ async function requestGroqExtraction(params: {
       throw new Error(`Groq extraction failed: ${res.status} ${raw}`);
     }
 
-    const parsed = safeParseJson<Record<string, unknown>>(raw);
+    const parsed = safeParseJson<GroqChatCompletionResponse>(raw);
     const content = parsed?.choices?.[0]?.message?.content;
 
     if (typeof content !== "string" || !content.trim()) {
