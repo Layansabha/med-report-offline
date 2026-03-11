@@ -5,9 +5,10 @@ export const runtime = "nodejs";
 
 export async function GET(
   _req: Request,
-  { params }: { params: { jobId: string } },
+  { params }: { params: Promise<{ jobId: string }> },
 ) {
-  const job = getExtractionJob(params.jobId);
+  const { jobId } = await params;
+  const job = getExtractionJob(jobId);
 
   if (!job) {
     return NextResponse.json({ error: "Job not found." }, { status: 404 });
