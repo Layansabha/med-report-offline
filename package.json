@@ -1,0 +1,27 @@
+{
+  "name": "med-report-offline",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "serve:out": "npx serve out -l 8080",
+    "docker:build": "docker build -t medreport-offline .",
+    "docker:run": "docker run -p 8080:80 medreport-offline"
+  },
+  "dependencies": {
+    "next": "^15.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.5.0",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.6.3",
+    "serve": "^14.2.3"
+  }
+}

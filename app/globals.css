@@ -1,0 +1,40 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Clinic-grade calm palette */
+    --bg: 245 247 250;
+    --surface: 255 255 255;
+    --card: 252 253 255;
+    --border: 226 232 240;
+    --text: 15 23 42;
+    --muted: 71 85 105;
+    --primary: 2 132 199;
+  }
+
+  body {
+    margin: 0;
+    background: rgb(var(--bg));
+    color: rgb(var(--text));
+  }
+
+  * {
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  .print-only {
+    display: block !important;
+  }
+  body {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+    background: #ffffff !important;
+  }
+}
