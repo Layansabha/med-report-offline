@@ -71,7 +71,7 @@ function pickSupportedMimeType(): string {
         return candidate;
       }
     } catch {
-      // ignore browser quirks
+      // ignore
     }
   }
 
@@ -171,7 +171,7 @@ export default function VoiceScribe({ onApply }: VoiceScribeProps) {
       if (data.status === "done") {
         clearPolling();
         setResult(data.result);
-        setStatus("Structured report is ready");
+        setStatus("Structured medical draft is ready");
         onApply?.(data.result);
         return;
       }
@@ -385,7 +385,7 @@ export default function VoiceScribe({ onApply }: VoiceScribeProps) {
     }
 
     setIsStopping(true);
-    setStatus("Stopping recording and preparing file...");
+    setStatus("Stopping recording and preparing audio...");
     recorder.stop();
   };
 
@@ -435,8 +435,8 @@ export default function VoiceScribe({ onApply }: VoiceScribeProps) {
             AI Medical Scribe
           </h2>
           <p className="mt-1 text-sm text-neutral-600">
-            Record or upload a visit audio file, transcribe mixed Arabic and
-            English speech, then generate a structured medical draft.
+            Record or upload visit audio, transcribe mixed Arabic and English,
+            then generate a structured medical draft.
           </p>
         </div>
 
@@ -520,7 +520,7 @@ export default function VoiceScribe({ onApply }: VoiceScribeProps) {
               Transcript
             </h3>
             <p className="mt-1 text-xs text-neutral-500">
-              Raw speech-to-text output from the uploaded or recorded audio.
+              Raw speech-to-text output from the recorded or uploaded audio.
             </p>
           </div>
 

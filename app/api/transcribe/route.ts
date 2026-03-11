@@ -64,15 +64,21 @@ export async function POST(req: Request) {
 
     const model = process.env.GROQ_TRANSCRIBE_MODEL || "whisper-large-v3";
 
-    const prompt =
-      process.env.GROQ_TRANSCRIBE_PROMPT ||
-      [
-        "Medical dictation with mixed Arabic and English speech.",
-        "Transcribe exactly what is said.",
-        "Preserve medication names, diagnoses, symptoms, numbers, ages, dosages, and abbreviations.",
-        "Do not translate unnecessarily.",
-        "Do not invent words that are not in the audio.",
-      ].join(" ");
+    const spellingHints = process.env.GROQ_TRANSCRIBE_HINTS || "";
+
+    const promptParts = [
+      "Mixed Arabic and English medical dictation.",
+      "Preserve medication names, dosages, diagnoses, abbreviations, ages, and numbers exactly as spoken.",
+      "Keep English medical words in Latin spelling when they are spoken in English.",
+      "If a drug name is spoken inside Arabic speech, preserve it accurately and do not omit it.",
+      "Do not invent words that are not present in the audio.",
+    ];
+
+    if (spellingHints.trim()) {
+      promptParts.push(`Important spellings: ${spellingHints.trim()}`);
+    }
+
+    const prompt = promptParts.join(" ");
 
     const groqForm = new FormData();
     groqForm.append("file", file, file.name || `visit-${Date.now()}.webm`);
@@ -82,8 +88,7 @@ export async function POST(req: Request) {
     groqForm.append("prompt", prompt);
     groqForm.append("timestamp_granularities[]", "segment");
 
-    // Important:
-    // We intentionally do NOT force "language" here,
+    // Intentionally do NOT set `language`
     // because the doctor may mix Arabic and English in the same recording.
 
     const groqRes = await fetch(GROQ_TRANSCRIBE_URL, {

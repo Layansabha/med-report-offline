@@ -342,21 +342,30 @@ function buildPrompts(
         .join("\n")
     : "No systems catalog provided.";
 
+  const medicationHints = process.env.GROQ_MEDICATION_HINTS?.trim() || "";
+
   const systemPrompt = [
     "You are a medical scribe extraction engine.",
-    "Your task is to convert a clinical transcript into structured JSON.",
+    "Convert a clinical transcript into structured JSON.",
     "The transcript may contain mixed Arabic and English speech.",
     "Return JSON only.",
-    "All output fields should be in English whenever reasonably possible.",
-    "Keep medication names, brand names, abbreviations, dosages, numbers, and identifiers exactly as spoken when needed.",
+    "Use English for general note fields whenever reasonably possible.",
+    "For medication names, keep the original spoken medication name if you are not fully confident in standardizing it.",
+    "If a medication is explicitly mentioned, include it in the medications array even if dose/how/purpose/plan are missing.",
+    "If dose/how/purpose/plan are missing, return empty strings for those fields.",
+    "Do not omit an explicitly mentioned medicine just because the instruction is incomplete.",
     "Do not invent facts.",
-    'If a field is unknown, return an empty string "".',
-    "If an array field is unknown, return [].",
-    "Only include medications that are explicitly stated in the transcript.",
-    "Only include diagnosis hints that are explicitly supported by the transcript.",
-    "If no confident system match exists, leave systemId empty.",
+    'Unknown strings must be "".',
+    "Unknown arrays must be [].",
+    "Only include medications and diagnoses that are clearly supported by the transcript.",
     "Do not add commentary outside the JSON object.",
-  ].join(" ");
+  ]
+    .concat(
+      medicationHints
+        ? [`Helpful medication spellings: ${medicationHints}`]
+        : [],
+    )
+    .join(" ");
 
   const userPrompt = [
     "Schema:",
