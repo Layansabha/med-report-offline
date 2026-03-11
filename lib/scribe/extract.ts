@@ -28,11 +28,30 @@ export type StructuredDraft = {
   warnings: string[];
 };
 
+type StructuredPayload = Omit<StructuredDraft, "transcript">;
+
 type SystemCatalogEntry = {
   id: string;
   name: string;
   diagnosis?: string;
 };
+
+const GROQ_BASE_URL =
+  process.env.GROQ_BASE_URL || "https://api.groq.com/openai/v1";
+const DEFAULT_TEXT_MODEL = process.env.GROQ_TEXT_MODEL || "openai/gpt-oss-20b";
+
+const STRICT_SCHEMA_MODELS = new Set([
+  "openai/gpt-oss-20b",
+  "openai/gpt-oss-120b",
+]);
+
+const BEST_EFFORT_SCHEMA_MODELS = new Set([
+  "openai/gpt-oss-20b",
+  "openai/gpt-oss-120b",
+  "moonshotai/kimi-k2-instruct-0905",
+  "meta-llama/llama-4-scout-17b-16e-instruct",
+  "meta-llama/llama-4-maverick-17b-128e-instruct",
+]);
 
 const NUMBER_WORDS: Record<string, string> = {
   zero: "0",
@@ -71,12 +90,14 @@ function dedupeStrings(values: string[]) {
   const out: string[] = [];
 
   for (const item of values) {
-    const v = compactText(item);
-    if (!v) continue;
-    const key = v.toLowerCase();
+    const value = compactText(item);
+    if (!value) continue;
+
+    const key = value.toLowerCase();
     if (seen.has(key)) continue;
+
     seen.add(key);
-    out.push(v);
+    out.push(value);
   }
 
   return out;
@@ -99,9 +120,11 @@ function extractJsonObject(text: string) {
   const cleaned = cleanJsonText(text);
   const first = cleaned.indexOf("{");
   const last = cleaned.lastIndexOf("}");
+
   if (first !== -1 && last !== -1 && last > first) {
     return cleaned.slice(first, last + 1);
   }
+
   return cleaned;
 }
 
@@ -154,7 +177,6 @@ function extractCaseNumber(transcript: string) {
   if (digitMatch?.[1]) return digitMatch[1].trim();
 
   const wordMatch = transcript.match(/\bcase number[:\s-]*([a-zA-Z]+)\b/i);
-
   if (wordMatch?.[1]) {
     const word = wordMatch[1].toLowerCase().trim();
     return NUMBER_WORDS[word] || word;
@@ -164,10 +186,11 @@ function extractCaseNumber(transcript: string) {
 }
 
 function fallbackAge(transcript: string) {
-  const m =
+  const match =
     transcript.match(/\b(\d{1,3})\s*year[s]?\s*old\b/i) ||
     transcript.match(/\bage[:\s-]*(\d{1,3})\b/i);
-  return m?.[1]?.trim() || "";
+
+  return match?.[1]?.trim() || "";
 }
 
 function fallbackSex(transcript: string) {
@@ -187,9 +210,9 @@ function fallbackChiefComplaint(transcript: string) {
     /\bpresenting complaint[:\s-]*([^.]+)/i,
   ];
 
-  for (const p of patterns) {
-    const m = transcript.match(p);
-    if (m?.[1]) return compactText(m[1]);
+  for (const pattern of patterns) {
+    const match = transcript.match(pattern);
+    if (match?.[1]) return compactText(match[1]);
   }
 
   return "";
@@ -202,9 +225,9 @@ function fallbackHistory(transcript: string) {
     /\bknown case of ([^.]+)/i,
   ];
 
-  for (const p of patterns) {
-    const m = transcript.match(p);
-    if (m?.[1]) return compactText(m[1]);
+  for (const pattern of patterns) {
+    const match = transcript.match(pattern);
+    if (match?.[1]) return compactText(match[1]);
   }
 
   return "";
@@ -217,6 +240,7 @@ function fallbackDiagnosisHints(transcript: string) {
   if (t.includes("small bowel obstruction") || /\bsbo\b/i.test(transcript)) {
     out.push("Small bowel obstruction");
   }
+
   if (
     t.includes("biliary calculus") ||
     t.includes("biliary calculi") ||
@@ -225,6 +249,7 @@ function fallbackDiagnosisHints(transcript: string) {
   ) {
     out.push("Biliary calculus");
   }
+
   if (t.includes("gallstone ileus")) out.push("Gallstone ileus");
   if (t.includes("type 2 diabetes")) out.push("Type 2 diabetes");
   if (t.includes("hypertension")) out.push("Hypertension");
@@ -264,13 +289,13 @@ function fallbackLabSummary(transcript: string) {
   const t = transcript;
 
   if (/wbc|cbc|y count/i.test(t)) {
-    const m = t.match(/(?:wbc|y count|cbc)[^.]{0,120}/i);
-    if (m?.[0]) parts.push(compactText(m[0]));
+    const match = t.match(/(?:wbc|y count|cbc)[^.]{0,120}/i);
+    if (match?.[0]) parts.push(compactText(match[0]));
   }
 
   if (/hemoglobin/i.test(t)) {
-    const m = t.match(/hemoglobin[^.]{0,80}/i);
-    if (m?.[0]) parts.push(compactText(m[0]));
+    const match = t.match(/hemoglobin[^.]{0,80}/i);
+    if (match?.[0]) parts.push(compactText(match[0]));
   }
 
   if (/electrolytes are normal/i.test(t)) parts.push("electrolytes normal");
@@ -300,6 +325,52 @@ function fallbackImagingSummary(transcript: string) {
   return dedupeStrings(parts).join(", ");
 }
 
+function normalizeMedication(value: unknown): ScribeMedication {
+  const medication = (value ?? {}) as Record<string, unknown>;
+
+  return {
+    systemId: safeString(medication.systemId),
+    diagnosis: safeString(medication.diagnosis),
+    medication: safeString(medication.medication),
+    dose: safeString(medication.dose),
+    how: safeString(medication.how),
+    purpose: safeString(medication.purpose),
+    plan: safeString(medication.plan),
+  };
+}
+
+function normalizeStructuredPayload(value: unknown): StructuredPayload {
+  const payload = (value ?? {}) as Record<string, unknown>;
+
+  return {
+    patientName: safeString(payload.patientName),
+    caseNumber: safeString(payload.caseNumber),
+    age: safeString(payload.age),
+    sex: safeString(payload.sex),
+    chiefComplaint: safeString(payload.chiefComplaint),
+    significantHistory: safeString(payload.significantHistory),
+    associatedSymptoms: Array.isArray(payload.associatedSymptoms)
+      ? dedupeStrings(
+          payload.associatedSymptoms.map((item) => safeString(item)),
+        )
+      : [],
+    examFindings: safeString(payload.examFindings),
+    labSummary: safeString(payload.labSummary),
+    imagingSummary: safeString(payload.imagingSummary),
+    diagnosisHints: Array.isArray(payload.diagnosisHints)
+      ? dedupeStrings(payload.diagnosisHints.map((item) => safeString(item)))
+      : [],
+    medications: Array.isArray(payload.medications)
+      ? payload.medications
+          .map(normalizeMedication)
+          .filter((item) => item.medication)
+      : [],
+    warnings: Array.isArray(payload.warnings)
+      ? uniqueWarnings(payload.warnings.map((item) => safeString(item)))
+      : [],
+  };
+}
+
 function mapMedicationToSystem(
   med: ScribeMedication,
   systemCatalog: SystemCatalogEntry[],
@@ -312,15 +383,20 @@ function mapMedicationToSystem(
   const diagnosisNorm = normalizeForMatch(diagnosis);
   if (!diagnosisNorm) return med;
 
-  const matched = systemCatalog.find((s) => {
-    const a = normalizeForMatch(s.diagnosis || "");
-    const b = normalizeForMatch(s.name || "");
+  const matched = systemCatalog.find((system) => {
+    const diagnosisName = normalizeForMatch(system.diagnosis || "");
+    const systemName = normalizeForMatch(system.name || "");
+
     return (
-      diagnosisNorm === a || diagnosisNorm === b || a.includes(diagnosisNorm)
+      diagnosisNorm === diagnosisName ||
+      diagnosisNorm === systemName ||
+      diagnosisName.includes(diagnosisNorm)
     );
   });
 
-  if (!matched) return med;
+  if (!matched) {
+    return med;
+  }
 
   return {
     ...med,
@@ -335,9 +411,11 @@ async function loadSystemCatalog(): Promise<SystemCatalogEntry[]> {
     const raw = await fs.readFile(systemsPath, "utf8");
     const parsed = JSON.parse(raw);
 
-    if (!Array.isArray(parsed)) return [];
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
 
-    return parsed.map((item: any) => ({
+    return parsed.map((item: Record<string, unknown>) => ({
       id: safeString(item?.id),
       name: safeString(item?.name),
       diagnosis: safeString(item?.diagnosis),
@@ -347,16 +425,10 @@ async function loadSystemCatalog(): Promise<SystemCatalogEntry[]> {
   }
 }
 
-async function callOllama(
-  transcript: string,
-  systemCatalog: SystemCatalogEntry[],
-): Promise<Omit<StructuredDraft, "transcript">> {
-  const ollamaUrl =
-    process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434/api/chat";
-  const model = process.env.OLLAMA_MODEL || "qwen2.5:3b-instruct";
-
-  const schema = {
+function buildSchema() {
+  return {
     type: "object",
+    additionalProperties: false,
     properties: {
       patientName: { type: "string" },
       caseNumber: { type: "string" },
@@ -364,15 +436,22 @@ async function callOllama(
       sex: { type: "string" },
       chiefComplaint: { type: "string" },
       significantHistory: { type: "string" },
-      associatedSymptoms: { type: "array", items: { type: "string" } },
+      associatedSymptoms: {
+        type: "array",
+        items: { type: "string" },
+      },
       examFindings: { type: "string" },
       labSummary: { type: "string" },
       imagingSummary: { type: "string" },
-      diagnosisHints: { type: "array", items: { type: "string" } },
+      diagnosisHints: {
+        type: "array",
+        items: { type: "string" },
+      },
       medications: {
         type: "array",
         items: {
           type: "object",
+          additionalProperties: false,
           properties: {
             systemId: { type: "string" },
             diagnosis: { type: "string" },
@@ -393,7 +472,10 @@ async function callOllama(
           ],
         },
       },
-      warnings: { type: "array", items: { type: "string" } },
+      warnings: {
+        type: "array",
+        items: { type: "string" },
+      },
     },
     required: [
       "patientName",
@@ -411,111 +493,171 @@ async function callOllama(
       "warnings",
     ],
   };
+}
 
+function buildResponseFormat(
+  model: string,
+  schema: ReturnType<typeof buildSchema>,
+) {
+  if (STRICT_SCHEMA_MODELS.has(model)) {
+    return {
+      type: "json_schema",
+      json_schema: {
+        name: "medical_scribe_draft",
+        strict: true,
+        schema,
+      },
+    };
+  }
+
+  if (BEST_EFFORT_SCHEMA_MODELS.has(model)) {
+    return {
+      type: "json_schema",
+      json_schema: {
+        name: "medical_scribe_draft",
+        strict: false,
+        schema,
+      },
+    };
+  }
+
+  return {
+    type: "json_object",
+  };
+}
+
+function buildPrompts(
+  transcript: string,
+  systemCatalog: SystemCatalogEntry[],
+  schema: ReturnType<typeof buildSchema>,
+) {
   const systemsText = systemCatalog.length
     ? systemCatalog
         .map(
-          (s) =>
-            `- id:${s.id} | name:${s.name} | diagnosis:${s.diagnosis || ""}`,
+          (system) =>
+            `- id:${system.id} | name:${system.name} | diagnosis:${system.diagnosis || ""}`,
         )
         .join("\n")
     : "No systems catalog provided.";
 
-  const systemPrompt = `
-You extract structured medical data from a clinical transcript.
-Return JSON only.
-Do not invent facts.
-Unknown strings = "".
-Unknown arrays = [].
-Ignore teaching chatter, answer choices, and social-media filler.
-Medication list must contain only explicit medication instructions.
-If no confident system match exists, keep systemId and diagnosis empty.
-Available systems:
-${systemsText}
-`.trim();
+  const systemPrompt = [
+    "You extract structured medical data from a clinical transcript.",
+    "The transcript may mix Arabic and English.",
+    "Return JSON only.",
+    'Unknown strings must be "".',
+    "Unknown arrays must be [].",
+    "Do not invent facts.",
+    "Do not translate medication names unless the transcript already says them in English.",
+    "Preserve numbers, ages, dosages, case numbers, and medication names exactly as spoken whenever possible.",
+    "Medication list must contain only explicit medication instructions.",
+    "If no confident system match exists, keep systemId and diagnosis empty.",
+  ].join(" ");
 
-  const userPrompt = `
-Schema:
-${JSON.stringify(schema)}
+  const userPrompt = [
+    "Schema:",
+    JSON.stringify(schema),
+    "",
+    "Available systems:",
+    systemsText,
+    "",
+    "Transcript:",
+    transcript,
+  ].join("\n");
 
-Transcript:
-${transcript}
-`.trim();
+  return { systemPrompt, userPrompt };
+}
+
+async function requestGroqExtraction(params: {
+  model: string;
+  systemPrompt: string;
+  userPrompt: string;
+  responseFormat: Record<string, unknown>;
+}) {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) {
+    throw new Error("Missing GROQ_API_KEY.");
+  }
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 45000);
 
   try {
-    const res = await fetch(ollamaUrl, {
+    const res = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
       signal: controller.signal,
       body: JSON.stringify({
-        model,
-        stream: false,
-        format: schema,
-        options: {
-          temperature: 0,
-          top_p: 0.9,
-        },
+        model: params.model,
+        temperature: 0,
         messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt },
+          { role: "system", content: params.systemPrompt },
+          { role: "user", content: params.userPrompt },
         ],
+        response_format: params.responseFormat,
       }),
     });
 
+    const raw = await res.text();
+
     if (!res.ok) {
-      const txt = await res.text();
-      throw new Error(`Ollama failed: ${res.status} ${txt}`);
+      throw new Error(`Groq extraction failed: ${res.status} ${raw}`);
     }
 
-    const data = await res.json();
-    const content = data?.message?.content ?? "";
-    const parsed = safeParseJson<any>(content);
+    const parsed = safeParseJson<Record<string, unknown>>(raw);
+    const content = parsed?.choices?.[0]?.message?.content;
 
-    if (!parsed) {
-      throw new Error(`Failed to parse Ollama JSON: ${content}`);
+    if (typeof content !== "string" || !content.trim()) {
+      throw new Error("Groq returned empty extraction content.");
     }
 
-    return {
-      patientName: safeString(parsed.patientName),
-      caseNumber: safeString(parsed.caseNumber),
-      age: safeString(parsed.age),
-      sex: safeString(parsed.sex),
-      chiefComplaint: safeString(parsed.chiefComplaint),
-      significantHistory: safeString(parsed.significantHistory),
-      associatedSymptoms: Array.isArray(parsed.associatedSymptoms)
-        ? dedupeStrings(
-            parsed.associatedSymptoms.map((x: unknown) => safeString(x)),
-          )
-        : [],
-      examFindings: safeString(parsed.examFindings),
-      labSummary: safeString(parsed.labSummary),
-      imagingSummary: safeString(parsed.imagingSummary),
-      diagnosisHints: Array.isArray(parsed.diagnosisHints)
-        ? dedupeStrings(
-            parsed.diagnosisHints.map((x: unknown) => safeString(x)),
-          )
-        : [],
-      medications: Array.isArray(parsed.medications)
-        ? parsed.medications.map((m: any) => ({
-            systemId: safeString(m.systemId),
-            diagnosis: safeString(m.diagnosis),
-            medication: safeString(m.medication),
-            dose: safeString(m.dose),
-            how: safeString(m.how),
-            purpose: safeString(m.purpose),
-            plan: safeString(m.plan),
-          }))
-        : [],
-      warnings: Array.isArray(parsed.warnings)
-        ? uniqueWarnings(parsed.warnings.map((x: unknown) => safeString(x)))
-        : [],
-    };
+    return content;
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function callGroqExtraction(
+  transcript: string,
+  systemCatalog: SystemCatalogEntry[],
+): Promise<StructuredPayload> {
+  const model = DEFAULT_TEXT_MODEL;
+  const schema = buildSchema();
+  const { systemPrompt, userPrompt } = buildPrompts(
+    transcript,
+    systemCatalog,
+    schema,
+  );
+
+  const primaryResponseFormat = buildResponseFormat(model, schema);
+
+  let content = await requestGroqExtraction({
+    model,
+    systemPrompt,
+    userPrompt,
+    responseFormat: primaryResponseFormat,
+  });
+
+  let parsed = safeParseJson<StructuredPayload>(content);
+
+  if (!parsed && primaryResponseFormat.type !== "json_object") {
+    content = await requestGroqExtraction({
+      model,
+      systemPrompt: `${systemPrompt} Return a valid JSON object only. No prose, no markdown.`,
+      userPrompt,
+      responseFormat: { type: "json_object" },
+    });
+
+    parsed = safeParseJson<StructuredPayload>(content);
+  }
+
+  if (!parsed) {
+    throw new Error(`Failed to parse Groq JSON: ${content}`);
+  }
+
+  return normalizeStructuredPayload(parsed);
 }
 
 export async function extractStructuredDraft(
@@ -544,7 +686,7 @@ export async function extractStructuredDraft(
 
   const cleanedTranscript = removeTeachingNoise(transcript) || transcript;
   const systemCatalog = await loadSystemCatalog();
-  const structured = await callOllama(cleanedTranscript, systemCatalog);
+  const structured = await callGroqExtraction(cleanedTranscript, systemCatalog);
 
   const finalCaseNumber =
     structured.caseNumber || extractCaseNumber(transcript);
@@ -562,8 +704,10 @@ export async function extractStructuredDraft(
 
   const finalExam =
     structured.examFindings || fallbackExamFindings(cleanedTranscript);
+
   const finalLabs =
     structured.labSummary || fallbackLabSummary(cleanedTranscript);
+
   const finalImaging =
     structured.imagingSummary || fallbackImagingSummary(cleanedTranscript);
 
@@ -574,8 +718,8 @@ export async function extractStructuredDraft(
 
   const finalMedications = Array.isArray(structured.medications)
     ? structured.medications
-        .map((m) => mapMedicationToSystem(m, systemCatalog))
-        .filter((m) => m.medication)
+        .map((medication) => mapMedicationToSystem(medication, systemCatalog))
+        .filter((medication) => medication.medication)
     : [];
 
   const warnings = uniqueWarnings([

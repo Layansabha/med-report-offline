@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "start": "next start",
     "serve:out": "npx serve out -l 8080",
     "docker:build": "docker build -t medreport-offline .",
     "docker:run": "docker run -p 8080:80 medreport-offline"
