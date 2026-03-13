@@ -10,6 +10,7 @@ const SCRIBE_STORAGE_KEY = "imr_v4_scribe";
 export type ScribeMedication = {
   systemId: string;
   diagnosis: string;
+  rawMedication?: string;
   medication: string;
   dose: string;
   how: string;
@@ -21,8 +22,14 @@ export type ScribeDraft = {
   transcript?: string;
   patientName?: string;
   caseNumber?: string;
+  dob?: string;
   age?: string;
   sex?: string;
+  occupation?: string;
+  supervisingDoctor?: string;
+  carer?: string;
+  allergies?: string;
+  intolerances?: string;
   chiefComplaint?: string;
   significantHistory?: string;
   associatedSymptoms?: string[];
@@ -30,6 +37,12 @@ export type ScribeDraft = {
   labSummary?: string;
   imagingSummary?: string;
   diagnosisHints?: string[];
+  reviewCompletedBy?: string;
+  treatmentGoals?: string;
+  nextReviewDate?: string;
+  nextReviewMode?: "In-person" | "Video" | "";
+  beforeNextReview?: string;
+  notes?: string;
   medications?: ScribeMedication[];
   warnings?: string[];
 };
@@ -89,7 +102,10 @@ function summarizeAppliedResult(result: ScribeDraft | null) {
 
   const parts: string[] = [];
 
-  if (result.patientName?.trim()) parts.push("patient details");
+  if (result.patientName?.trim()) parts.push("patient name");
+  if (result.caseNumber?.trim()) parts.push("case number");
+  if (result.occupation?.trim()) parts.push("occupation");
+  if (result.supervisingDoctor?.trim()) parts.push("supervising doctor");
   if (result.significantHistory?.trim()) parts.push("history");
   if ((result.medications?.length ?? 0) > 0) {
     parts.push(
@@ -285,11 +301,19 @@ export default function VoiceScribe({
       }
 
       const finalTranscript =
-        typeof data?.text === "string" ? data.text.trim() : "";
+        typeof data?.mixedText === "string"
+          ? data.mixedText.trim()
+          : typeof data?.text === "string"
+            ? data.text.trim()
+            : "";
 
       setTranscript(finalTranscript);
       setDetectedLanguage(
-        typeof data?.language === "string" ? data.language : "",
+        typeof data?.languageHint === "string"
+          ? data.languageHint
+          : typeof data?.language === "string"
+            ? data.language
+            : "",
       );
 
       if (!finalTranscript) {
@@ -522,7 +546,7 @@ export default function VoiceScribe({
     }
 
     if (phase === "processing") {
-      return "Processing audio and applying matched data to the report.";
+      return "Processing bilingual audio and applying matched data to the report.";
     }
 
     if (phase === "applied") {
@@ -536,7 +560,7 @@ export default function VoiceScribe({
       return "The audio import needs attention.";
     }
 
-    return "Record or upload visit audio. Patient details, history, and medications apply directly to the form.";
+    return "Record or upload mixed Arabic and English visit audio. The transcript stays bilingual, then patient details, history, review fields, and medications apply directly to the form.";
   }, [phase, result]);
 
   return (

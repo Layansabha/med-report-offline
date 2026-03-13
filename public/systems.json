@@ -1,0 +1,191 @@
+[
+  {
+    "id": "heart-blood-vessels",
+    "name": "Heart and blood vessels",
+    "diagnoses": [
+      "Coronary Artery Disease",
+      "Hypertension",
+      "Heart Failure",
+      "Valvular Heart Disease",
+      "Myocardial Infarction",
+      "Arrhythmia",
+      "Pulmonary Embolism",
+      "Peripheral Artery Disease",
+      "Deep Vein Thrombosis",
+      "Stroke",
+      "Fluid build up"
+    ]
+  },
+  {
+    "id": "lungs",
+    "name": "Lungs",
+    "diagnoses": [
+      "Asthma",
+      "COPD",
+      "Pneumonia",
+      "Pulmonary Fibrosis",
+      "Bronchitis",
+      "Pulmonary Hypertension"
+    ]
+  },
+  {
+    "id": "digestive-system",
+    "name": "Digestive system",
+    "diagnoses": [
+      "Gastroesophageal Reflux Disease",
+      "Irritable Bowel Syndrome",
+      "Peptic Ulcer Disease",
+      "Crohn’s Disease",
+      "Ulcerative Colitis",
+      "Hepatitis",
+      "Gallstones",
+      "Fatty Liver Disease",
+      "Liver Cirrhosis",
+      "Gastritis",
+      "Celiac Disease",
+      "Diverticulitis",
+      "Hemorrhoids",
+      "Constipation",
+      "Diarrhea",
+      "Hiatal Hernia",
+      "Esophagitis"
+    ]
+  },
+  {
+    "id": "kidneys-bladder",
+    "name": "Kidneys and bladder",
+    "diagnoses": [
+      "Chronic Kidney Disease",
+      "Benign Prostatic Hyperplasia",
+      "Kidney Stones",
+      "Urinary Tract Infection",
+      "Glomerulonephritis",
+      "Polycystic Kidney Disease",
+      "Interstitial Cystitis",
+      "Overactive Bladder",
+      "Proteinuria",
+      "Renal Failure"
+    ]
+  },
+  {
+    "id": "brain-nervous-system",
+    "name": "Brain and nervous system",
+    "diagnoses": [
+      "Alzheimer's Disease",
+      "Parkinson's Disease",
+      "Stroke",
+      "Epilepsy",
+      "Multiple Sclerosis",
+      "Dementia",
+      "Peripheral Neuropathy",
+      "Trigeminal Neuralgia",
+      "Migraine",
+      "Brain Tumors"
+    ]
+  },
+  {
+    "id": "hormones",
+    "name": "Hormones",
+    "diagnoses": [
+      "Diabetes Mellitus",
+      "Hyperthyroidism",
+      "Hypothyroidism",
+      "Addison's Disease",
+      "Hyperprolactinemia",
+      "Polycystic Ovary Syndrome",
+      "Hypogonadism",
+      "Hashimoto's Thyroiditis",
+      "Graves' Disease",
+      "Hypoparathyroidism",
+      "Growth Hormone Deficiency",
+      "Insulin Resistance"
+    ]
+  },
+  {
+    "id": "infection",
+    "name": "Infection",
+    "diagnoses": [
+      "Influenza",
+      "Pneumonia",
+      "Tuberculosis",
+      "HIV/AIDS",
+      "Whooping Cough (Pertussis)",
+      "Hepatitis B",
+      "Hepatitis C",
+      "Malaria",
+      "COVID-19",
+      "Scarlet Fever",
+      "Typhoid Fever",
+      "Chlamydia",
+      "Gonorrhea",
+      "Syphilis",
+      "Lyme Disease",
+      "Chickenpox",
+      "Shingles"
+    ]
+  },
+  {
+    "id": "muscles-joints-bones",
+    "name": "Muscles, joints and bones",
+    "diagnoses": [
+      "Osteoarthritis",
+      "Rheumatoid Arthritis",
+      "Osteoporosis",
+      "Fibromyalgia",
+      "Gout",
+      "Tendinitis",
+      "Bursitis",
+      "Sprains",
+      "Strains",
+      "Lupus",
+      "Sciatica",
+      "Plantar Fasciitis"
+    ]
+  },
+  {
+    "id": "cancer",
+    "name": "Cancer",
+    "diagnoses": []
+  },
+  {
+    "id": "blood-nutrition",
+    "name": "Blood / nutrition",
+    "diagnoses": [
+      "Scurvy",
+      "Iron Deficiency Anemia",
+      "Vitamin B12 Deficiency",
+      "Folate Deficiency",
+      "Hemophilia",
+      "Sickle Cell Disease",
+      "Thalassemia",
+      "Leukemia",
+      "Lymphoma",
+      "Multiple Myeloma",
+      "Hemochromatosis",
+      "Deep Vein Thrombosis",
+      "Hypocalcemia",
+      "Hyperkalemia",
+      "Hypokalemia"
+    ]
+  },
+  {
+    "id": "eye",
+    "name": "Eye",
+    "diagnoses": []
+  },
+  {
+    "id": "ent",
+    "name": "Ear, nose and throat",
+    "diagnoses": []
+  },
+  {
+    "id": "skin",
+    "name": "Skin",
+    "diagnoses": []
+  },
+  {
+    "id": "vitamins-supplements",
+    "name": "Vitamins & supplements",
+    "diagnoses": []
+  }
+]

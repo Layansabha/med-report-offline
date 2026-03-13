@@ -1,29 +1,23 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type Dispatch,
+  type SetStateAction,
+  type ReactNode,
+} from "react";
 import VoiceScribe, { type ScribeDraft } from "../components/VoiceScribe";
 
-/* ===================== Types ===================== */
+type TabKey = "patient" | "meds" | "review";
+type ExportLanguage = "en" | "ar";
 
-type RowTemplate = {
-  medication_options: string[];
-  dose_options: string[];
-  how_options: string[];
-  purpose_options: string[];
-  plan_options: string[];
-};
-
-type SystemTemplate = {
+type SystemCatalog = {
   id: string;
   name: string;
-  diagnosis?: string;
-  diagnosis_date?: string;
-  row_templates: RowTemplate[];
-};
-
-type CustomColumn = {
-  id: string;
-  title: string;
+  diagnoses: string[];
 };
 
 type MedicationRow = {
@@ -33,11 +27,9 @@ type MedicationRow = {
   how: string;
   purpose: string;
   plan: string;
-  templateIndex?: number;
-  extra: Record<string, string>;
 };
 
-type SystemSection = {
+type MedicationSection = {
   id: string;
   systemId: string;
   diagnosis: string;
@@ -45,24 +37,109 @@ type SystemSection = {
   rows: MedicationRow[];
 };
 
-type InputMode = "smart" | "pick" | "type";
-type TabKey = "meds" | "patient" | "review";
-
 type ToastState = null | {
   message: string;
-  undoLabel?: string;
-  onUndo?: () => void;
 };
 
-type MapList = Record<string, string[]>;
+type SuggestionState = {
+  medications: string[];
+  doses: string[];
+  how: string[];
+  purposes: string[];
+  plans: string[];
+};
 
-/* ===================== Storage Keys ===================== */
+type ReportRow = {
+  system: string;
+  diagnosis: string;
+  diagnosisDate: string;
+  medication: string;
+  dose: string;
+  how: string;
+  purpose: string;
+  plan: string;
+};
 
-const STORAGE_KEY = "imr_v4";
-const RECENTS_KEY = "imr_v4_recents";
-const FAVS_KEY = "imr_v4_favs";
+type ReportPayload = {
+  language: ExportLanguage;
+  title: string;
+  patientName: string;
+  dob: string;
+  mrn: string;
+  occupation: string;
+  supervisingDoctor: string;
+  carer: string;
+  allergies: string;
+  intolerances: string;
+  significantHistory: string;
+  reviewDate: string;
+  reviewCompletedBy: string;
+  treatmentGoals: string;
+  nextReviewDate: string;
+  nextReviewMode: string;
+  beforeNextReview: string;
+  notes: string;
+  rows: ReportRow[];
+};
 
-/* ===================== Utils ===================== */
+const STORAGE_KEY = "imr_v5_business";
+const DEFAULT_HOW_OPTIONS = [
+  "Take with Food",
+  "Take on an Empty Stomach",
+  "Take with a Full Glass of Water",
+  "Take Before Meals",
+  "Take After Meals",
+  "Take at Bedtime",
+  "Take in the Morning",
+  "Take Every 4-6 Hours as Needed",
+  "Take Every 8 Hours",
+  "Take Every 12 Hours",
+  "Take Once Daily",
+  "Take Twice Daily",
+  "Take Three Times Daily",
+  "Take Every Other Day",
+  "Take as Directed by Physician",
+  "Take with a Spoonful of Water (for dissolvable tablets)",
+  "Take Without Chewing (for slow-release or coated tablets)",
+  "Take Entire Dose at Once",
+  "Take in Divided Doses (split throughout the day)",
+  "Dissolve in Water Before Taking",
+  "Shake Well Before Use (for suspensions)",
+  "Apply Topically (for creams or ointments)",
+  "Use as Eye Drops",
+  "Take weekly with fatty meals",
+  "Take at night with orange or lemon",
+  "Take 2 every 12 hours",
+  "Take 1/2 tablet in the morning",
+];
+const DEFAULT_PLAN_OPTIONS = [
+  "Lab tests",
+  "Blood pressure readings",
+  "DXA scan",
+  "Medication review with Consultant",
+];
+const DEFAULT_DOSE_OPTIONS = [
+  "2.5 mg",
+  "5 mg",
+  "10 mg",
+  "20 mg",
+  "25 mg",
+  "40 mg",
+  "50 mg",
+  "100 mg",
+  "250 mg",
+  "500 mg",
+  "1 tablet",
+  "1/2 tablet",
+  "1 capsule",
+  "2 tablets",
+  "5 ml",
+  "10 ml",
+  "1 puff",
+  "2 puffs",
+  "1 drop",
+  "2 drops",
+];
 
 function uid() {
   return Math.random().toString(36).slice(2, 10);
@@ -76,178 +153,567 @@ function todayISO(): string {
   return `${y}-${m}-${day}`;
 }
 
-function normalize(s: string) {
-  return (s ?? "").toLowerCase().trim();
+function normalize(value: string) {
+  return (value ?? "").trim().toLowerCase();
 }
 
-function uniqKeepOrder(arr: string[]) {
+function uniqKeepOrder(values: string[]) {
   const seen = new Set<string>();
   const out: string[] = [];
 
-  for (const x of arr) {
-    const v = x.trim();
-    if (!v) continue;
-    const k = v.toLowerCase();
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push(v);
+  for (const value of values) {
+    const next = value.trim();
+    if (!next) continue;
+    const key = next.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(next);
   }
 
   return out;
 }
 
-/* ===================== Page ===================== */
+function toInputDate(value: string) {
+  const raw = value.trim();
+  if (!raw) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  if (/^\d{4}\/\d{2}\/\d{2}$/.test(raw)) return raw.replaceAll("/", "-");
+
+  const match = raw.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+  if (!match) return "";
+
+  const [, dd, mm, yyyy] = match;
+  return `${yyyy}-${mm.padStart(2, "0")}-${dd.padStart(2, "0")}`;
+}
+
+function englishFallback(value: string) {
+  return value || "—";
+}
+
+function buildReportPayload(params: {
+  language: ExportLanguage;
+  patientName: string;
+  dob: string;
+  mrn: string;
+  occupation: string;
+  supervisingDoctor: string;
+  carer: string;
+  allergies: string;
+  intolerances: string;
+  significantHistory: string;
+  reviewDate: string;
+  reviewCompletedBy: string;
+  treatmentGoals: string;
+  nextReviewDate: string;
+  nextReviewMode: string;
+  beforeNextReview: string;
+  notes: string;
+  sections: MedicationSection[];
+  systemById: Map<string, SystemCatalog>;
+}): ReportPayload {
+  return {
+    language: params.language,
+    title: "Clinical Medication Review",
+    patientName: params.patientName.trim(),
+    dob: params.dob.trim(),
+    mrn: params.mrn.trim(),
+    occupation: params.occupation.trim(),
+    supervisingDoctor: params.supervisingDoctor.trim(),
+    carer: params.carer.trim(),
+    allergies: params.allergies.trim(),
+    intolerances: params.intolerances.trim(),
+    significantHistory: params.significantHistory.trim(),
+    reviewDate: params.reviewDate.trim(),
+    reviewCompletedBy: params.reviewCompletedBy.trim(),
+    treatmentGoals: params.treatmentGoals.trim(),
+    nextReviewDate: params.nextReviewDate.trim(),
+    nextReviewMode: params.nextReviewMode.trim(),
+    beforeNextReview: params.beforeNextReview.trim(),
+    notes: params.notes.trim(),
+    rows: params.sections.flatMap((section) => {
+      const systemName = params.systemById.get(section.systemId)?.name || "";
+      return section.rows.map((row) => ({
+        system: systemName,
+        diagnosis: section.diagnosis,
+        diagnosisDate: section.diagnosisDate,
+        medication: row.medication.trim(),
+        dose: row.dose.trim(),
+        how: row.how.trim(),
+        purpose: row.purpose.trim(),
+        plan: row.plan.trim(),
+      }));
+    }),
+  };
+}
+
+function buildPrintHtml(payload: ReportPayload) {
+  const isArabic = payload.language === "ar";
+  const dir = isArabic ? "rtl" : "ltr";
+  const labels = isArabic
+    ? {
+        patient: "بيانات المريض",
+        patientName: "اسم المريض",
+        dob: "تاريخ الميلاد",
+        mrn: "رقم الملف / الحالة",
+        occupation: "العمل",
+        supervisingDoctor: "الطبيب المشرف",
+        carer: "المرافق / الممثل",
+        allergies: "الحساسية",
+        intolerances: "عدم التحمل",
+        history: "التاريخ المرضي المهم",
+        meds: "الأدوية حسب الجهاز",
+        system: "الجهاز",
+        diagnosis: "التشخيص والتاريخ إن وجد",
+        medication: "الدواء والجرعة",
+        how: "طريقة الاستخدام",
+        purpose: "الغرض من الدواء",
+        plan: "الخطة المتفق عليها / المراجعة القادمة",
+        review: "معلومات المراجعة",
+        reviewDate: "تاريخ المراجعة",
+        reviewCompletedBy: "تمت المراجعة بواسطة",
+        treatmentGoals: "الأهداف العلاجية",
+        nextReviewDate: "تاريخ المراجعة القادمة",
+        nextReviewMode: "نوع المراجعة القادمة",
+        beforeNextReview: "قبل المراجعة القادمة",
+        notes: "ملاحظات",
+        empty: "—",
+      }
+    : {
+        patient: "Patient details",
+        patientName: "Patient name",
+        dob: "Date of birth",
+        mrn: "MRN / case number",
+        occupation: "Occupation",
+        supervisingDoctor: "Supervising doctor",
+        carer: "Carer / representative",
+        allergies: "Allergies",
+        intolerances: "Intolerances",
+        history: "Significant history",
+        meds: "Medications by system",
+        system: "System",
+        diagnosis: "Diagnosis and date if available",
+        medication: "Medication & Dose",
+        how: "How to take",
+        purpose: "What are they for?",
+        plan: "Agreed Plan / Next Review",
+        review: "Review details",
+        reviewDate: "Review date",
+        reviewCompletedBy: "Review completed by",
+        treatmentGoals: "Treatment goals",
+        nextReviewDate: "Next review date",
+        nextReviewMode: "Next review mode",
+        beforeNextReview: "Before next review",
+        notes: "Notes",
+        empty: "—",
+      };
+
+  const tableRows = payload.rows.length
+    ? payload.rows
+        .map((row) => {
+          const diagnosisCell = [row.diagnosis, row.diagnosisDate]
+            .filter(Boolean)
+            .join(row.diagnosis && row.diagnosisDate ? " • " : "");
+          const medicationCell = [row.medication, row.dose]
+            .filter(Boolean)
+            .join(row.medication && row.dose ? " • " : "");
+          return `
+            <tr>
+              <td>${escapeHtml(row.system || labels.empty)}</td>
+              <td>${escapeHtml(diagnosisCell || labels.empty)}</td>
+              <td>${escapeHtml(medicationCell || labels.empty)}</td>
+              <td>${escapeHtml(row.how || labels.empty)}</td>
+              <td>${escapeHtml(row.purpose || labels.empty)}</td>
+              <td>${escapeHtml(row.plan || labels.empty)}</td>
+            </tr>
+          `;
+        })
+        .join("")
+    : `
+      <tr>
+        <td colspan="6" class="empty-row">${escapeHtml(labels.empty)}</td>
+      </tr>
+    `;
+
+  return `<!doctype html>
+<html lang="${isArabic ? "ar" : "en"}" dir="${dir}">
+  <head>
+    <meta charset="utf-8" />
+    <title>${escapeHtml(payload.title)}</title>
+    <style>
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 32px;
+        font-family: Arial, Helvetica, sans-serif;
+        color: #0f172a;
+        background: white;
+      }
+      .page { max-width: 1120px; margin: 0 auto; }
+      .header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 24px;
+        border-bottom: 2px solid #e2e8f0;
+        padding-bottom: 16px;
+      }
+      h1 { margin: 0; font-size: 28px; }
+      .muted { color: #64748b; font-size: 13px; margin-top: 6px; }
+      .section { margin-top: 24px; }
+      .section-title {
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #475569;
+        margin-bottom: 12px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+      }
+      .card {
+        border: 1px solid #e2e8f0;
+        border-radius: 16px;
+        padding: 12px 14px;
+        background: #f8fafc;
+        min-height: 68px;
+      }
+      .label {
+        font-size: 12px;
+        color: #64748b;
+        margin-bottom: 6px;
+      }
+      .value {
+        font-size: 14px;
+        line-height: 1.55;
+        white-space: pre-wrap;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        border: 1px solid #e2e8f0;
+        border-radius: 16px;
+        overflow: hidden;
+      }
+      thead th {
+        background: #eff6ff;
+        color: #1e3a8a;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+      th, td {
+        border-bottom: 1px solid #e2e8f0;
+        padding: 12px;
+        text-align: ${isArabic ? "right" : "left"};
+        vertical-align: top;
+        font-size: 13px;
+        line-height: 1.5;
+      }
+      tr:last-child td { border-bottom: none; }
+      .empty-row { text-align: center; color: #64748b; }
+      @media print {
+        body { padding: 0; }
+        .page { max-width: 100%; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <div class="header">
+        <div>
+          <h1>${escapeHtml(payload.title)}</h1>
+          <div class="muted">${escapeHtml(
+            isArabic ? "نسخة قابلة للطباعة" : "Printable report",
+          )}</div>
+        </div>
+        <div class="muted">${escapeHtml(payload.reviewDate || todayISO())}</div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">${escapeHtml(labels.patient)}</div>
+        <div class="grid">
+          ${buildCard(labels.patientName, payload.patientName || labels.empty)}
+          ${buildCard(labels.dob, payload.dob || labels.empty)}
+          ${buildCard(labels.mrn, payload.mrn || labels.empty)}
+          ${buildCard(labels.occupation, payload.occupation || labels.empty)}
+          ${buildCard(
+            labels.supervisingDoctor,
+            payload.supervisingDoctor || labels.empty,
+          )}
+          ${buildCard(labels.carer, payload.carer || labels.empty)}
+          ${buildCard(labels.allergies, payload.allergies || labels.empty)}
+          ${buildCard(
+            labels.intolerances,
+            payload.intolerances || labels.empty,
+          )}
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">${escapeHtml(labels.history)}</div>
+        ${buildCard("", payload.significantHistory || labels.empty)}
+      </div>
+
+      <div class="section">
+        <div class="section-title">${escapeHtml(labels.meds)}</div>
+        <table>
+          <thead>
+            <tr>
+              <th>${escapeHtml(labels.system)}</th>
+              <th>${escapeHtml(labels.diagnosis)}</th>
+              <th>${escapeHtml(labels.medication)}</th>
+              <th>${escapeHtml(labels.how)}</th>
+              <th>${escapeHtml(labels.purpose)}</th>
+              <th>${escapeHtml(labels.plan)}</th>
+            </tr>
+          </thead>
+          <tbody>${tableRows}</tbody>
+        </table>
+      </div>
+
+      <div class="section">
+        <div class="section-title">${escapeHtml(labels.review)}</div>
+        <div class="grid">
+          ${buildCard(labels.reviewDate, payload.reviewDate || labels.empty)}
+          ${buildCard(
+            labels.reviewCompletedBy,
+            payload.reviewCompletedBy || labels.empty,
+          )}
+          ${buildCard(
+            labels.treatmentGoals,
+            payload.treatmentGoals || labels.empty,
+          )}
+          ${buildCard(
+            labels.nextReviewDate,
+            payload.nextReviewDate || labels.empty,
+          )}
+          ${buildCard(
+            labels.nextReviewMode,
+            payload.nextReviewMode || labels.empty,
+          )}
+          ${buildCard(
+            labels.beforeNextReview,
+            payload.beforeNextReview || labels.empty,
+          )}
+          ${buildCard(labels.notes, payload.notes || labels.empty)}
+        </div>
+      </div>
+    </div>
+  </body>
+</html>`;
+}
+
+function buildCard(label: string, value: string) {
+  return `<div class="card">${
+    label ? `<div class="label">${escapeHtml(label)}</div>` : ""
+  }<div class="value">${escapeHtml(value)}</div></div>`;
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function openPrintWindow(html: string) {
+  const win = window.open("", "_blank", "noopener,noreferrer");
+  if (!win) {
+    throw new Error("Popup blocked. Allow popups to print the report.");
+  }
+
+  win.document.open();
+  win.document.write(html);
+  win.document.close();
+  win.focus();
+  win.onload = () => {
+    win.print();
+  };
+}
+
+function Field({
+  label,
+  children,
+  hint,
+}: {
+  label: string;
+  children: ReactNode;
+  hint?: string;
+}) {
+  return (
+    <label className="flex flex-col gap-2">
+      <div>
+        <div className="text-sm font-semibold text-slate-800">{label}</div>
+        {hint ? (
+          <div className="mt-1 text-xs text-slate-500">{hint}</div>
+        ) : null}
+      </div>
+      {children}
+    </label>
+  );
+}
+
+function SummaryTile({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+      <div className="text-xs font-medium uppercase tracking-[0.14em] text-slate-500">
+        {label}
+      </div>
+      <div className="mt-2 whitespace-pre-wrap text-sm font-medium text-slate-900">
+        {value || "—"}
+      </div>
+    </div>
+  );
+}
 
 export default function Page() {
-  const [tab, setTab] = useState<TabKey>("meds");
+  const [tab, setTab] = useState<TabKey>("patient");
+  const [systems, setSystems] = useState<SystemCatalog[]>([]);
+  const [systemsLoaded, setSystemsLoaded] = useState(false);
 
   const [patientName, setPatientName] = useState("");
   const [dob, setDob] = useState("");
   const [mrn, setMrn] = useState("");
+  const [occupation, setOccupation] = useState("");
+  const [supervisingDoctor, setSupervisingDoctor] = useState("");
+  const [carer, setCarer] = useState("");
   const [allergies, setAllergies] = useState("");
   const [intolerances, setIntolerances] = useState("");
-  const [carer, setCarer] = useState("");
-
   const [significantHistory, setSignificantHistory] = useState("");
-
-  const [reviewDate, setReviewDate] = useState<string>(todayISO());
+  const [reviewDate, setReviewDate] = useState(todayISO());
   const [reviewCompletedBy, setReviewCompletedBy] = useState("");
   const [treatmentGoals, setTreatmentGoals] = useState("");
-
-  const [nextReviewDate, setNextReviewDate] = useState<string>("");
+  const [nextReviewDate, setNextReviewDate] = useState("");
   const [nextReviewMode, setNextReviewMode] = useState<
     "" | "In-person" | "Video"
   >("");
   const [beforeNextReview, setBeforeNextReview] = useState("");
-
   const [notes, setNotes] = useState("");
 
-  const [systems, setSystems] = useState<SystemTemplate[]>([]);
-  const [customColumns, setCustomColumns] = useState<CustomColumn[]>([]);
-  const [newColTitle, setNewColTitle] = useState("");
-
-  const [sections, setSections] = useState<SystemSection[]>([]);
+  const [sections, setSections] = useState<MedicationSection[]>([]);
   const [addSystemId, setAddSystemId] = useState("");
-
   const [search, setSearch] = useState("");
   const [incompleteOnly, setIncompleteOnly] = useState(false);
-
-  const [showMore, setShowMore] = useState(false);
-  const [inputMode, setInputMode] = useState<InputMode>("smart");
-  const [dense, setDense] = useState(false);
 
   const [online, setOnline] = useState(true);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">(
     "idle",
   );
-  const [confirmResetOpen, setConfirmResetOpen] = useState(false);
+  const [toast, setToast] = useState<ToastState>(null);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportBusy, setExportBusy] = useState<ExportLanguage | "">("");
   const [scribeResetSignal, setScribeResetSignal] = useState(0);
 
-  const [toast, setToast] = useState<ToastState>(null);
+  const [suggestions, setSuggestions] = useState<SuggestionState>({
+    medications: [],
+    doses: [],
+    how: [],
+    purposes: [],
+    plans: [],
+  });
+
   const toastTimer = useRef<number | null>(null);
 
-  const [recents, setRecents] = useState<MapList>({});
-  const [favs, setFavs] = useState<MapList>({});
-
-  const [editorOpen, setEditorOpen] = useState(false);
-  const [editorSectionId, setEditorSectionId] = useState<string>("");
-  const [editorRowId, setEditorRowId] = useState<string | null>(null);
-  const [editorTemplateIndex, setEditorTemplateIndex] = useState<
-    number | undefined
-  >(undefined);
-  const [editorDraft, setEditorDraft] = useState<MedicationRow>(() => ({
-    id: "draft",
-    medication: "",
-    dose: "",
-    how: "",
-    purpose: "",
-    plan: "",
-    extra: {},
-  }));
-
-  const refMed = useRef<HTMLInputElement | HTMLSelectElement | null>(null);
-  const refDose = useRef<HTMLInputElement | HTMLSelectElement | null>(null);
-  const refHow = useRef<HTMLInputElement | HTMLSelectElement | null>(null);
-  const refPurpose = useRef<HTMLInputElement | HTMLSelectElement | null>(null);
-  const refPlan = useRef<HTMLInputElement | HTMLSelectElement | null>(null);
-
-  /* ===================== Load systems ===================== */
   useEffect(() => {
     fetch("/systems.json")
-      .then((r) => r.json())
-      .then((data) => setSystems(Array.isArray(data) ? data : []));
+      .then((res) => res.json())
+      .then((data) => {
+        setSystems(Array.isArray(data) ? data : []);
+      })
+      .finally(() => setSystemsLoaded(true));
   }, []);
 
-  /* ===================== Online/offline ===================== */
   useEffect(() => {
     setOnline(typeof navigator !== "undefined" ? navigator.onLine : true);
-
     const onUp = () => setOnline(true);
     const onDown = () => setOnline(false);
-
     window.addEventListener("online", onUp);
     window.addEventListener("offline", onDown);
-
     return () => {
       window.removeEventListener("online", onUp);
       window.removeEventListener("offline", onDown);
     };
   }, []);
 
-  /* ===================== Load recents/favs ===================== */
-  useEffect(() => {
-    try {
-      const r = localStorage.getItem(RECENTS_KEY);
-      if (r) setRecents(JSON.parse(r) ?? {});
-    } catch {}
-
-    try {
-      const f = localStorage.getItem(FAVS_KEY);
-      if (f) setFavs(JSON.parse(f) ?? {});
-    } catch {}
-  }, []);
-
-  /* ===================== Autosave load ===================== */
   useEffect(() => {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (!raw) return;
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
 
-      const parsed = JSON.parse(raw);
-
-      setPatientName(parsed.patientName ?? "");
-      setDob(parsed.dob ?? "");
-      setMrn(parsed.mrn ?? "");
-      setAllergies(parsed.allergies ?? "");
-      setIntolerances(parsed.intolerances ?? "");
-      setCarer(parsed.carer ?? "");
-      setSignificantHistory(parsed.significantHistory ?? "");
-      setReviewDate(parsed.reviewDate ?? todayISO());
-      setReviewCompletedBy(parsed.reviewCompletedBy ?? "");
-      setTreatmentGoals(parsed.treatmentGoals ?? "");
-      setNextReviewDate(parsed.nextReviewDate ?? "");
-      setNextReviewMode(parsed.nextReviewMode ?? "");
-      setBeforeNextReview(parsed.beforeNextReview ?? "");
-      setNotes(parsed.notes ?? "");
-      setCustomColumns(
-        Array.isArray(parsed.customColumns) ? parsed.customColumns : [],
+      setPatientName(String(parsed.patientName ?? ""));
+      setDob(String(parsed.dob ?? ""));
+      setMrn(String(parsed.mrn ?? ""));
+      setOccupation(String(parsed.occupation ?? ""));
+      setSupervisingDoctor(String(parsed.supervisingDoctor ?? ""));
+      setCarer(String(parsed.carer ?? ""));
+      setAllergies(String(parsed.allergies ?? ""));
+      setIntolerances(String(parsed.intolerances ?? ""));
+      setSignificantHistory(String(parsed.significantHistory ?? ""));
+      setReviewDate(String(parsed.reviewDate ?? todayISO()));
+      setReviewCompletedBy(String(parsed.reviewCompletedBy ?? ""));
+      setTreatmentGoals(String(parsed.treatmentGoals ?? ""));
+      setNextReviewDate(String(parsed.nextReviewDate ?? ""));
+      setNextReviewMode(
+        parsed.nextReviewMode === "In-person" ||
+          parsed.nextReviewMode === "Video"
+          ? parsed.nextReviewMode
+          : "",
       );
-      setSections(Array.isArray(parsed.sections) ? parsed.sections : []);
-      setShowMore(Boolean(parsed.showMore));
-      setInputMode(parsed.inputMode ?? "smart");
-      setDense(Boolean(parsed.dense));
-    } catch {}
+      setBeforeNextReview(String(parsed.beforeNextReview ?? ""));
+      setNotes(String(parsed.notes ?? ""));
+      setAddSystemId(String(parsed.addSystemId ?? ""));
+      setSearch(String(parsed.search ?? ""));
+      setIncompleteOnly(Boolean(parsed.incompleteOnly));
+      setSections(
+        Array.isArray(parsed.sections)
+          ? (parsed.sections as MedicationSection[])
+          : [],
+      );
+      const loadedSuggestions = parsed.suggestions;
+      if (loadedSuggestions && typeof loadedSuggestions === "object") {
+        setSuggestions({
+          medications: Array.isArray(
+            (loadedSuggestions as SuggestionState).medications,
+          )
+            ? uniqKeepOrder((loadedSuggestions as SuggestionState).medications)
+            : [],
+          doses: Array.isArray((loadedSuggestions as SuggestionState).doses)
+            ? uniqKeepOrder((loadedSuggestions as SuggestionState).doses)
+            : [],
+          how: Array.isArray((loadedSuggestions as SuggestionState).how)
+            ? uniqKeepOrder((loadedSuggestions as SuggestionState).how)
+            : [],
+          purposes: Array.isArray(
+            (loadedSuggestions as SuggestionState).purposes,
+          )
+            ? uniqKeepOrder((loadedSuggestions as SuggestionState).purposes)
+            : [],
+          plans: Array.isArray((loadedSuggestions as SuggestionState).plans)
+            ? uniqKeepOrder((loadedSuggestions as SuggestionState).plans)
+            : [],
+        });
+      }
+    } catch {
+      // ignore broken local state
+    }
   }, []);
 
-  /* ===================== Autosave save ===================== */
   useEffect(() => {
     const payload = {
       patientName,
       dob,
       mrn,
+      occupation,
+      supervisingDoctor,
+      carer,
       allergies,
       intolerances,
-      carer,
       significantHistory,
       reviewDate,
       reviewCompletedBy,
@@ -256,31 +722,31 @@ export default function Page() {
       nextReviewMode,
       beforeNextReview,
       notes,
-      customColumns,
+      addSystemId,
+      search,
+      incompleteOnly,
       sections,
-      showMore,
-      inputMode,
-      dense,
+      suggestions,
     };
 
     setSaveState("saving");
-    const t = window.setTimeout(() => {
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-        setSaveState("saved");
-      } catch {
-        setSaveState("idle");
-      }
-    }, 350);
-
-    return () => window.clearTimeout(t);
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+      const timer = window.setTimeout(() => setSaveState("saved"), 160);
+      return () => window.clearTimeout(timer);
+    } catch {
+      setSaveState("idle");
+      return undefined;
+    }
   }, [
     patientName,
     dob,
     mrn,
+    occupation,
+    supervisingDoctor,
+    carer,
     allergies,
     intolerances,
-    carer,
     significantHistory,
     reviewDate,
     reviewCompletedBy,
@@ -289,382 +755,422 @@ export default function Page() {
     nextReviewMode,
     beforeNextReview,
     notes,
-    customColumns,
+    addSystemId,
+    search,
+    incompleteOnly,
     sections,
-    showMore,
-    inputMode,
-    dense,
+    suggestions,
   ]);
 
-  /* ===================== Persist recents/favs ===================== */
   useEffect(() => {
-    try {
-      localStorage.setItem(RECENTS_KEY, JSON.stringify(recents));
-    } catch {}
-  }, [recents]);
+    if (!toast) return;
+    if (toastTimer.current) {
+      window.clearTimeout(toastTimer.current);
+    }
+    toastTimer.current = window.setTimeout(() => setToast(null), 2600);
+    return () => {
+      if (toastTimer.current) {
+        window.clearTimeout(toastTimer.current);
+      }
+    };
+  }, [toast]);
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(FAVS_KEY, JSON.stringify(favs));
-    } catch {}
-  }, [favs]);
-
-  /* ===================== Toast ===================== */
-  function showToast(next: ToastState) {
-    if (toastTimer.current) window.clearTimeout(toastTimer.current);
-    setToast(next);
-    toastTimer.current = window.setTimeout(() => setToast(null), 2800);
-  }
-
-  /* ===================== Computed ===================== */
   const systemById = useMemo(() => {
-    const m = new Map<string, SystemTemplate>();
-    systems.forEach((s) => m.set(s.id, s));
-    return m;
+    return new Map(systems.map((system) => [system.id, system]));
   }, [systems]);
 
-  const totalRows = useMemo(
-    () => sections.reduce((acc, s) => acc + s.rows.length, 0),
-    [sections],
+  const allMedicationSuggestions = useMemo(
+    () => uniqKeepOrder(suggestions.medications),
+    [suggestions.medications],
   );
-
-  const requiredMissing = useMemo(() => {
-    let missing = 0;
-    if (!patientName.trim()) missing += 1;
-    if (!reviewDate.trim()) missing += 1;
-    if (!reviewCompletedBy.trim()) missing += 1;
-    if (!sections.length) missing += 1;
-    return missing;
-  }, [patientName, reviewDate, reviewCompletedBy, sections]);
-
-  const readyToPrint = requiredMissing === 0;
+  const allDoseSuggestions = useMemo(
+    () => uniqKeepOrder([...DEFAULT_DOSE_OPTIONS, ...suggestions.doses]),
+    [suggestions.doses],
+  );
+  const allHowSuggestions = useMemo(
+    () => uniqKeepOrder([...DEFAULT_HOW_OPTIONS, ...suggestions.how]),
+    [suggestions.how],
+  );
+  const allPurposeSuggestions = useMemo(
+    () => uniqKeepOrder(suggestions.purposes),
+    [suggestions.purposes],
+  );
+  const allPlanSuggestions = useMemo(
+    () => uniqKeepOrder([...DEFAULT_PLAN_OPTIONS, ...suggestions.plans]),
+    [suggestions.plans],
+  );
 
   const filteredSections = useMemo(() => {
     const q = normalize(search);
-
     return sections
-      .map((sec) => {
-        const rows = sec.rows.filter((r) => {
-          const matchSearch =
-            !q ||
-            [
-              systemById.get(sec.systemId)?.name ?? "",
-              sec.diagnosis,
-              r.medication,
-              r.dose,
-              r.how,
-              r.purpose,
-              r.plan,
-              ...Object.values(r.extra ?? {}),
-            ]
-              .join(" \n ")
-              .toLowerCase()
-              .includes(q);
+      .map((section) => {
+        const systemName = systemById.get(section.systemId)?.name || "";
+        const rows = section.rows.filter((row) => {
+          const text = [
+            systemName,
+            section.diagnosis,
+            section.diagnosisDate,
+            row.medication,
+            row.dose,
+            row.how,
+            row.purpose,
+            row.plan,
+          ]
+            .join(" ")
+            .toLowerCase();
 
-          const missingCritical =
-            !r.medication.trim() ||
-            !r.dose.trim() ||
-            !r.how.trim() ||
-            !r.plan.trim();
+          const matchesSearch = !q || text.includes(q);
+          const incomplete = [
+            row.medication,
+            row.dose,
+            row.how,
+            row.purpose,
+            row.plan,
+          ].some((value) => !value.trim());
 
-          return matchSearch && (!incompleteOnly || missingCritical);
+          return matchesSearch && (!incompleteOnly || incomplete);
         });
 
-        if (!q && !incompleteOnly) return sec;
-        return { ...sec, rows };
-      })
-      .filter((sec) => {
-        const systemName = systemById.get(sec.systemId)?.name ?? "";
-        const secMatch =
-          !search.trim() ||
-          `${systemName} ${sec.diagnosis}`
-            .toLowerCase()
-            .includes(search.toLowerCase());
-
-        return secMatch || sec.rows.length > 0;
-      });
-  }, [sections, search, incompleteOnly, systemById]);
-
-  /* ===================== Helpers ===================== */
-  function addRecent(systemId: string, med: string) {
-    const v = med.trim();
-    if (!systemId || !v) return;
-
-    setRecents((prev) => {
-      const list = uniqKeepOrder([v, ...(prev[systemId] ?? [])]).slice(0, 8);
-      return { ...prev, [systemId]: list };
-    });
-  }
-
-  function toggleFav(systemId: string, med: string) {
-    const v = med.trim();
-    if (!systemId || !v) return;
-
-    setFavs((prev) => {
-      const list = prev[systemId] ?? [];
-      const has = list.some((x) => normalize(x) === normalize(v));
-      return {
-        ...prev,
-        [systemId]: has
-          ? list.filter((x) => normalize(x) !== normalize(v))
-          : uniqKeepOrder([v, ...list]).slice(0, 20),
-      };
-    });
-  }
-
-  function makeBlankRow(): MedicationRow {
-    const extra: Record<string, string> = {};
-    customColumns.forEach((c) => {
-      extra[c.id] = "";
-    });
-
-    return {
-      id: `med-${uid()}`,
-      medication: "",
-      dose: "",
-      how: "",
-      purpose: "",
-      plan: "",
-      extra,
-    };
-  }
-
-  function addSystemSection(systemId: string) {
-    if (!systemId) return;
-
-    const sys = systemById.get(systemId);
-    if (!sys) return;
-
-    setSections((prev) => [
-      ...prev,
-      {
-        id: `sec-${uid()}`,
-        systemId,
-        diagnosis: sys.diagnosis ?? "",
-        diagnosisDate: sys.diagnosis_date ?? "",
-        rows: [],
-      },
-    ]);
-
-    setAddSystemId("");
-    setTab("meds");
-  }
-
-  function removeSystemSection(sectionId: string) {
-    const snapshot = sections;
-    setSections((prev) => prev.filter((s) => s.id !== sectionId));
-    showToast({
-      message: "System removed",
-      undoLabel: "Undo",
-      onUndo: () => setSections(snapshot),
-    });
-  }
-
-  function addCustomColumn() {
-    const title = newColTitle.trim();
-    if (!title) return;
-
-    const col: CustomColumn = { id: `col-${uid()}`, title };
-    setCustomColumns((prev) => [...prev, col]);
-    setSections((prev) =>
-      prev.map((sec) => ({
-        ...sec,
-        rows: sec.rows.map((r) => ({
-          ...r,
-          extra: { ...r.extra, [col.id]: "" },
-        })),
-      })),
-    );
-    setNewColTitle("");
-  }
-
-  function removeCustomColumn(colId: string) {
-    const snapshotCols = customColumns;
-    const snapshotSections = sections;
-
-    setCustomColumns((prev) => prev.filter((c) => c.id !== colId));
-    setSections((prev) =>
-      prev.map((sec) => ({
-        ...sec,
-        rows: sec.rows.map((r) => {
-          const nextExtra = { ...r.extra };
-          delete nextExtra[colId];
-          return { ...r, extra: nextExtra };
-        }),
-      })),
-    );
-
-    showToast({
-      message: "Custom column removed",
-      undoLabel: "Undo",
-      onUndo: () => {
-        setCustomColumns(snapshotCols);
-        setSections(snapshotSections);
-      },
-    });
-  }
-
-  function openAddRow(sectionId: string) {
-    const sec = sections.find((s) => s.id === sectionId);
-    if (!sec) return;
-
-    const blank = makeBlankRow();
-    setEditorOpen(true);
-    setEditorSectionId(sectionId);
-    setEditorRowId(null);
-    setEditorTemplateIndex(undefined);
-    setEditorDraft(blank);
-  }
-
-  function openEditRow(sectionId: string, rowId: string) {
-    const sec = sections.find((s) => s.id === sectionId);
-    const row = sec?.rows.find((r) => r.id === rowId);
-    if (!sec || !row) return;
-
-    setEditorOpen(true);
-    setEditorSectionId(sectionId);
-    setEditorRowId(rowId);
-    setEditorTemplateIndex(row.templateIndex);
-    setEditorDraft({
-      ...row,
-      extra: { ...row.extra },
-    });
-  }
-
-  function closeEditor() {
-    setEditorOpen(false);
-    setEditorSectionId("");
-    setEditorRowId(null);
-    setEditorTemplateIndex(undefined);
-    setEditorDraft(makeBlankRow());
-  }
-
-  function saveEditor() {
-    if (!editorSectionId) return;
-
-    const draft = {
-      ...editorDraft,
-      medication: editorDraft.medication.trim(),
-      dose: editorDraft.dose.trim(),
-      how: editorDraft.how.trim(),
-      purpose: editorDraft.purpose.trim(),
-      plan: editorDraft.plan.trim(),
-      extra: Object.fromEntries(
-        Object.entries(editorDraft.extra ?? {}).map(([k, v]) => [
-          k,
-          (v ?? "").trim(),
-        ]),
-      ),
-    };
-
-    setSections((prev) =>
-      prev.map((sec) => {
-        if (sec.id !== editorSectionId) return sec;
-
-        if (editorRowId) {
-          return {
-            ...sec,
-            rows: sec.rows.map((r) => (r.id === editorRowId ? draft : r)),
-          };
+        if (q && !rows.length) {
+          const sectionText =
+            `${systemName} ${section.diagnosis} ${section.diagnosisDate}`.toLowerCase();
+          if (!sectionText.includes(q)) {
+            return null;
+          }
         }
 
+        if (!rows.length && (q || incompleteOnly)) return null;
+
         return {
-          ...sec,
-          rows: [...sec.rows, { ...draft, id: `med-${uid()}` }],
+          ...section,
+          rows,
         };
-      }),
-    );
+      })
+      .filter(Boolean) as MedicationSection[];
+  }, [sections, systemById, search, incompleteOnly]);
 
-    const sec = sections.find((s) => s.id === editorSectionId);
-    if (sec && draft.medication) addRecent(sec.systemId, draft.medication);
+  const totalRows = useMemo(
+    () => sections.reduce((sum, section) => sum + section.rows.length, 0),
+    [sections],
+  );
 
-    showToast({
-      message: editorRowId ? "Medication updated" : "Medication added",
-    });
-    closeEditor();
+  function showToast(message: string) {
+    setToast({ message });
   }
 
-  function removeRow(sectionId: string, rowId: string) {
-    const snapshot = sections;
+  function addSection(systemId: string) {
+    if (!systemId) return;
+    const system = systemById.get(systemId);
+    const next: MedicationSection = {
+      id: `section-${uid()}`,
+      systemId,
+      diagnosis: "",
+      diagnosisDate: "",
+      rows: [
+        {
+          id: `row-${uid()}`,
+          medication: "",
+          dose: "",
+          how: "",
+          purpose: "",
+          plan: "",
+        },
+      ],
+    };
+    setSections((prev) => [...prev, next]);
+    setAddSystemId("");
+    setTab("meds");
+    showToast(`Added ${system?.name || "system"}`);
+  }
+
+  function removeSection(sectionId: string) {
+    setSections((prev) => prev.filter((section) => section.id !== sectionId));
+    showToast("System removed");
+  }
+
+  function updateSection(sectionId: string, patch: Partial<MedicationSection>) {
     setSections((prev) =>
-      prev.map((sec) =>
-        sec.id !== sectionId
-          ? sec
-          : { ...sec, rows: sec.rows.filter((r) => r.id !== rowId) },
+      prev.map((section) =>
+        section.id === sectionId ? { ...section, ...patch } : section,
       ),
     );
+  }
 
-    showToast({
-      message: "Medication removed",
-      undoLabel: "Undo",
-      onUndo: () => setSections(snapshot),
-    });
+  function addMedicationRow(sectionId: string) {
+    setSections((prev) =>
+      prev.map((section) =>
+        section.id === sectionId
+          ? {
+              ...section,
+              rows: [
+                ...section.rows,
+                {
+                  id: `row-${uid()}`,
+                  medication: "",
+                  dose: "",
+                  how: "",
+                  purpose: "",
+                  plan: "",
+                },
+              ],
+            }
+          : section,
+      ),
+    );
+  }
+
+  function updateRow(
+    sectionId: string,
+    rowId: string,
+    patch: Partial<MedicationRow>,
+  ) {
+    setSections((prev) =>
+      prev.map((section) =>
+        section.id === sectionId
+          ? {
+              ...section,
+              rows: section.rows.map((row) =>
+                row.id === rowId ? { ...row, ...patch } : row,
+              ),
+            }
+          : section,
+      ),
+    );
   }
 
   function duplicateRow(sectionId: string, rowId: string) {
     setSections((prev) =>
-      prev.map((sec) => {
-        if (sec.id !== sectionId) return sec;
-        const row = sec.rows.find((r) => r.id === rowId);
-        if (!row) return sec;
+      prev.map((section) => {
+        if (section.id !== sectionId) return section;
+        const source = section.rows.find((row) => row.id === rowId);
+        if (!source) return section;
         return {
-          ...sec,
+          ...section,
           rows: [
-            ...sec.rows,
+            ...section.rows,
             {
-              ...row,
-              id: `med-${uid()}`,
-              extra: { ...row.extra },
+              ...source,
+              id: `row-${uid()}`,
             },
           ],
         };
       }),
     );
-
-    showToast({ message: "Medication duplicated" });
   }
 
-  function moveRow(sectionId: string, rowId: string, dir: -1 | 1) {
+  function removeRow(sectionId: string, rowId: string) {
     setSections((prev) =>
-      prev.map((sec) => {
-        if (sec.id !== sectionId) return sec;
-        const idx = sec.rows.findIndex((r) => r.id === rowId);
-        if (idx === -1) return sec;
-        const nextIdx = idx + dir;
-        if (nextIdx < 0 || nextIdx >= sec.rows.length) return sec;
-        const nextRows = [...sec.rows];
-        const [item] = nextRows.splice(idx, 1);
-        nextRows.splice(nextIdx, 0, item);
-        return { ...sec, rows: nextRows };
+      prev.map((section) => {
+        if (section.id !== sectionId) return section;
+        const nextRows = section.rows.filter((row) => row.id !== rowId);
+        return {
+          ...section,
+          rows: nextRows.length
+            ? nextRows
+            : [
+                {
+                  id: `row-${uid()}`,
+                  medication: "",
+                  dose: "",
+                  how: "",
+                  purpose: "",
+                  plan: "",
+                },
+              ],
+        };
       }),
     );
   }
 
-  function applyTemplateToEditor(sectionId: string, templateIndex: number) {
-    const sec = sections.find((s) => s.id === sectionId);
-    const sys = sec ? systemById.get(sec.systemId) : null;
-    const template = sys?.row_templates?.[templateIndex];
-    if (!template) return;
+  function appendIfEmpty(
+    setter: Dispatch<SetStateAction<string>>,
+    incoming?: string,
+  ) {
+    const next = incoming?.trim();
+    if (!next) return;
+    setter((prev) => prev.trim() || next);
+  }
 
-    setEditorTemplateIndex(templateIndex);
-    setEditorDraft((prev) => ({
-      ...prev,
-      medication: prev.medication || template.medication_options?.[0] || "",
-      dose: prev.dose || template.dose_options?.[0] || "",
-      how: prev.how || template.how_options?.[0] || "",
-      purpose: prev.purpose || template.purpose_options?.[0] || "",
-      plan: prev.plan || template.plan_options?.[0] || "",
-      templateIndex,
+  function appendText(
+    setter: Dispatch<SetStateAction<string>>,
+    incoming?: string,
+  ) {
+    const next = incoming?.trim();
+    if (!next) return;
+    setter((prev) => (prev.trim() ? `${prev.trim()}\n${next}` : next));
+  }
+
+  function resolveSystemId(systemId?: string, diagnosis?: string) {
+    const direct = (systemId ?? "").trim();
+    if (direct && systemById.has(direct)) return direct;
+
+    const diagnosisNorm = normalize(diagnosis || "");
+    if (!diagnosisNorm) return "";
+
+    const matched = systems.find((system) => {
+      if (normalize(system.name) === diagnosisNorm) return true;
+      return system.diagnoses.some((item) => normalize(item) === diagnosisNorm);
+    });
+
+    return matched?.id || "";
+  }
+
+  function mergeTranscriptSuggestions(draft: ScribeDraft) {
+    const meds = Array.isArray(draft.medications) ? draft.medications : [];
+    setSuggestions((prev) => ({
+      medications: uniqKeepOrder([
+        ...prev.medications,
+        ...meds.map((item) => item.medication || item.rawMedication || ""),
+      ]),
+      doses: uniqKeepOrder([
+        ...prev.doses,
+        ...meds.map((item) => item.dose || ""),
+      ]),
+      how: uniqKeepOrder([...prev.how, ...meds.map((item) => item.how || "")]),
+      purposes: uniqKeepOrder([
+        ...prev.purposes,
+        ...meds.map((item) => item.purpose || ""),
+      ]),
+      plans: uniqKeepOrder([
+        ...prev.plans,
+        ...meds.map((item) => item.plan || ""),
+      ]),
     }));
   }
 
-  function clearAll() {
+  function applyScribeDraft(draft: ScribeDraft) {
+    appendIfEmpty(setPatientName, draft.patientName);
+    appendIfEmpty(setMrn, draft.caseNumber);
+    appendIfEmpty(setOccupation, draft.occupation);
+    appendIfEmpty(setSupervisingDoctor, draft.supervisingDoctor);
+    appendIfEmpty(setCarer, draft.carer);
+    appendIfEmpty(setAllergies, draft.allergies);
+    appendIfEmpty(setIntolerances, draft.intolerances);
+    appendIfEmpty(setReviewCompletedBy, draft.reviewCompletedBy);
+    appendIfEmpty(setTreatmentGoals, draft.treatmentGoals);
+    appendIfEmpty(setBeforeNextReview, draft.beforeNextReview);
+    appendIfEmpty(setNotes, draft.notes);
+
+    const nextDob = toInputDate(draft.dob || "");
+    if (nextDob) {
+      setDob((prev) => prev || nextDob);
+    }
+
+    const nextReview = toInputDate(draft.nextReviewDate || "");
+    if (nextReview) {
+      setNextReviewDate((prev) => prev || nextReview);
+    }
+
+    if (
+      draft.nextReviewMode === "In-person" ||
+      draft.nextReviewMode === "Video"
+    ) {
+      setNextReviewMode((prev) => prev || draft.nextReviewMode!);
+    }
+
+    appendText(setSignificantHistory, draft.significantHistory);
+
+    mergeTranscriptSuggestions(draft);
+
+    const medications = Array.isArray(draft.medications)
+      ? draft.medications
+      : [];
+    let addedCount = 0;
+    let skippedCount = 0;
+
+    if (medications.length) {
+      setSections((prev) => {
+        const next = [...prev];
+
+        for (const item of medications) {
+          const medicationName = (
+            item.medication ||
+            item.rawMedication ||
+            ""
+          ).trim();
+          if (!medicationName) {
+            skippedCount += 1;
+            continue;
+          }
+
+          const resolvedSystemId = resolveSystemId(
+            item.systemId,
+            item.diagnosis,
+          );
+          if (!resolvedSystemId) {
+            skippedCount += 1;
+            continue;
+          }
+
+          let section = next.find(
+            (entry) => entry.systemId === resolvedSystemId,
+          );
+          if (!section) {
+            section = {
+              id: `section-${uid()}`,
+              systemId: resolvedSystemId,
+              diagnosis: (item.diagnosis || "").trim(),
+              diagnosisDate: "",
+              rows: [],
+            };
+            next.push(section);
+          }
+
+          section.rows = [
+            ...section.rows,
+            {
+              id: `row-${uid()}`,
+              medication: medicationName,
+              dose: (item.dose || "").trim(),
+              how: (item.how || "").trim(),
+              purpose: (item.purpose || "").trim(),
+              plan: (item.plan || "").trim(),
+            },
+          ];
+
+          if (!section.diagnosis.trim() && item.diagnosis?.trim()) {
+            section.diagnosis = item.diagnosis.trim();
+          }
+
+          addedCount += 1;
+        }
+
+        return next;
+      });
+    }
+
+    const filled = [
+      draft.patientName,
+      draft.caseNumber,
+      draft.occupation,
+      draft.supervisingDoctor,
+      draft.significantHistory,
+      draft.allergies,
+      draft.intolerances,
+      draft.reviewCompletedBy,
+      draft.notes,
+    ].filter((value) => value?.trim()).length;
+
+    showToast(
+      addedCount || filled
+        ? `Applied ${filled} field${filled === 1 ? "" : "s"} and ${addedCount} medication${addedCount === 1 ? "" : "s"}${
+            skippedCount ? ` • skipped ${skippedCount}` : ""
+          }`
+        : "Nothing new was applied from the transcript.",
+    );
+
+    setTab(addedCount > 0 ? "meds" : "patient");
+  }
+
+  function resetDraft() {
     setPatientName("");
     setDob("");
     setMrn("");
+    setOccupation("");
+    setSupervisingDoctor("");
+    setCarer("");
     setAllergies("");
     setIntolerances("");
-    setCarer("");
     setSignificantHistory("");
     setReviewDate(todayISO());
     setReviewCompletedBy("");
@@ -673,257 +1179,196 @@ export default function Page() {
     setNextReviewMode("");
     setBeforeNextReview("");
     setNotes("");
-    setCustomColumns([]);
     setSections([]);
     setAddSystemId("");
     setSearch("");
     setIncompleteOnly(false);
-    setShowMore(false);
-    setInputMode("smart");
-    setDense(false);
-    setConfirmResetOpen(false);
+    setSuggestions({
+      medications: [],
+      doses: [],
+      how: [],
+      purposes: [],
+      plans: [],
+    });
     setScribeResetSignal((prev) => prev + 1);
-
     try {
       localStorage.removeItem(STORAGE_KEY);
-    } catch {}
-
-    showToast({ message: "Draft cleared" });
+    } catch {
+      // ignore
+    }
+    showToast("Draft cleared");
   }
 
-  function applyScribeDraft(draft: ScribeDraft) {
-    const meds = Array.isArray(draft?.medications) ? draft.medications : [];
-
-    if (draft.patientName?.trim()) {
-      setPatientName((prev) => prev.trim() || draft.patientName!.trim());
-    }
-
-    if (draft.caseNumber?.trim()) {
-      setMrn((prev) => prev.trim() || draft.caseNumber!.trim());
-    }
-
-    if (draft.significantHistory?.trim()) {
-      setSignificantHistory((prev) =>
-        prev.trim()
-          ? `${prev}\n${draft.significantHistory!.trim()}`
-          : draft.significantHistory!.trim(),
-      );
-    }
-
-    let addedCount = 0;
-    let skippedCount = 0;
-
-    if (meds.length > 0) {
-      setSections((prev) => {
-        const next = [...prev];
-
-        for (const item of meds) {
-          const systemId = (item.systemId ?? "").trim();
-          const medication = (item.medication ?? "").trim();
-
-          if (!medication) {
-            skippedCount++;
-            continue;
-          }
-
-          let secIndex = systemId
-            ? next.findIndex((s) => s.systemId === systemId)
-            : -1;
-
-          if (systemId && secIndex === -1 && systemById.has(systemId)) {
-            const sys = systemById.get(systemId);
-            next.push({
-              id: `sec-${uid()}`,
-              systemId,
-              diagnosis:
-                ((item.diagnosis ?? "").trim() || sys?.diagnosis) ?? "",
-              diagnosisDate: sys?.diagnosis_date ?? "",
-              rows: [],
-            });
-            secIndex = next.length - 1;
-          }
-
-          if (secIndex === -1) {
-            skippedCount++;
-            continue;
-          }
-
-          const extra: Record<string, string> = {};
-          for (const c of customColumns) extra[c.id] = "";
-
-          const sec = next[secIndex];
-          next[secIndex] = {
-            ...sec,
-            diagnosis: sec.diagnosis || (item.diagnosis ?? "").trim(),
-            rows: [
-              ...sec.rows,
-              {
-                id: `med-${uid()}`,
-                medication,
-                dose: (item.dose ?? "").trim(),
-                how: (item.how ?? "").trim(),
-                purpose: (item.purpose ?? "").trim(),
-                plan: (item.plan ?? "").trim() || "Start",
-                extra,
-              },
-            ],
-          };
-
-          addRecent(systemId, medication);
-          addedCount++;
-        }
-
-        return next;
+  async function handleExport(language: ExportLanguage) {
+    try {
+      setExportBusy(language);
+      const payload = buildReportPayload({
+        language,
+        patientName,
+        dob,
+        mrn,
+        occupation,
+        supervisingDoctor,
+        carer,
+        allergies,
+        intolerances,
+        significantHistory,
+        reviewDate,
+        reviewCompletedBy,
+        treatmentGoals,
+        nextReviewDate,
+        nextReviewMode,
+        beforeNextReview,
+        notes,
+        sections,
+        systemById,
       });
+
+      if (language === "ar") {
+        const res = await fetch("/api/report/translate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data?.error || "Arabic export failed.");
+        }
+        openPrintWindow(buildPrintHtml(data.report as ReportPayload));
+      } else {
+        openPrintWindow(buildPrintHtml(payload));
+      }
+
+      setExportOpen(false);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Export failed");
+    } finally {
+      setExportBusy("");
     }
-
-    const appliedSummary: string[] = [];
-    if (draft.patientName?.trim()) appliedSummary.push("patient name");
-    if (draft.caseNumber?.trim()) appliedSummary.push("case number");
-    if (draft.significantHistory?.trim()) appliedSummary.push("history");
-    if (addedCount > 0) {
-      appliedSummary.push(
-        `${addedCount} medication${addedCount > 1 ? "s" : ""}`,
-      );
-    }
-
-    const reviewCount = [
-      draft.age?.trim(),
-      draft.sex?.trim(),
-      draft.chiefComplaint?.trim(),
-      draft.associatedSymptoms?.length ? "symptoms" : "",
-      draft.examFindings?.trim(),
-      draft.labSummary?.trim(),
-      draft.imagingSummary?.trim(),
-      draft.diagnosisHints?.length ? "diagnosis hints" : "",
-      draft.warnings?.length ? "warnings" : "",
-    ].filter(Boolean).length;
-
-    const summary = [...appliedSummary];
-    if (reviewCount > 0) {
-      summary.push(`${reviewCount} review item${reviewCount > 1 ? "s" : ""}`);
-    }
-    if (skippedCount > 0) summary.push(`${skippedCount} skipped`);
-
-    showToast({
-      message:
-        appliedSummary.length > 0
-          ? `Applied: ${summary.join(" • ")}`
-          : summary.length > 0
-            ? `Processed: ${summary.join(" • ")}`
-            : "Nothing new was applied.",
-    });
-
-    setTab("meds");
   }
 
-  /* ===================== Styles ===================== */
-  useEffect(() => {
-    const root = document.documentElement;
-    root.style.setProperty("--bg", "246 248 252");
-    root.style.setProperty("--surface", "255 255 255");
-    root.style.setProperty("--card", "251 252 254");
-    root.style.setProperty("--text", "15 23 42");
-    root.style.setProperty("--muted", "100 116 139");
-    root.style.setProperty("--border", "226 232 240");
-    root.style.setProperty("--primary", "37 99 235");
-    root.style.setProperty("--primary-soft", "219 234 254");
-    root.style.setProperty("--success", "5 150 105");
-    root.style.setProperty("--warn", "217 119 6");
-    root.style.setProperty("--danger", "220 38 38");
-  }, []);
+  const previewPayload = useMemo(
+    () =>
+      buildReportPayload({
+        language: "en",
+        patientName,
+        dob,
+        mrn,
+        occupation,
+        supervisingDoctor,
+        carer,
+        allergies,
+        intolerances,
+        significantHistory,
+        reviewDate,
+        reviewCompletedBy,
+        treatmentGoals,
+        nextReviewDate,
+        nextReviewMode,
+        beforeNextReview,
+        notes,
+        sections,
+        systemById,
+      }),
+    [
+      patientName,
+      dob,
+      mrn,
+      occupation,
+      supervisingDoctor,
+      carer,
+      allergies,
+      intolerances,
+      significantHistory,
+      reviewDate,
+      reviewCompletedBy,
+      treatmentGoals,
+      nextReviewDate,
+      nextReviewMode,
+      beforeNextReview,
+      notes,
+      sections,
+      systemById,
+    ],
+  );
 
   return (
-    <div className="min-h-screen bg-[rgb(var(--bg))] text-[rgb(var(--text))]">
-      <main className="mx-auto flex w-full max-w-[1680px] flex-col gap-6 px-4 py-5 md:px-6 xl:px-8">
-        <section className="overflow-hidden rounded-[28px] border border-[rgb(var(--border))] bg-[rgb(var(--surface))] shadow-sm">
-          <div className="flex flex-col gap-5 px-5 py-5 lg:flex-row lg:items-start lg:justify-between lg:px-7 lg:py-6">
+    <div className="min-h-screen bg-slate-100 text-slate-900">
+      <main className="mx-auto flex w-full max-w-7xl flex-col gap-6 px-4 py-5 md:px-6 xl:px-8">
+        <section className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm md:p-6">
+          <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
             <div className="space-y-3">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="inline-flex items-center rounded-full border border-[rgb(var(--border))] bg-[rgba(var(--card),0.8)] px-3 py-1 text-xs font-semibold text-[rgb(var(--muted))]">
-                  Intelligent Medication Report
+                <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
+                  Clinical workflow
                 </span>
-
                 <span
                   className={[
                     "inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold",
-                    readyToPrint
+                    online
                       ? "border-emerald-200 bg-emerald-50 text-emerald-700"
                       : "border-amber-200 bg-amber-50 text-amber-700",
                   ].join(" ")}
                 >
-                  {readyToPrint
-                    ? "Ready to print"
-                    : `${requiredMissing} item${requiredMissing > 1 ? "s" : ""} missing`}
+                  {online ? "Online" : "Offline"}
                 </span>
-
-                <span
-                  className={[
-                    "inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold",
-                    saveState === "saved"
-                      ? "border-sky-200 bg-sky-50 text-sky-700"
-                      : saveState === "saving"
-                        ? "border-amber-200 bg-amber-50 text-amber-700"
-                        : "border-slate-200 bg-slate-50 text-slate-600",
-                  ].join(" ")}
-                >
+                <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-semibold text-slate-600">
                   {saveState === "saving"
-                    ? "Saving..."
+                    ? "Saving"
                     : saveState === "saved"
                       ? "Saved"
                       : "Draft"}
                 </span>
-
-                {!online && (
-                  <span className="inline-flex items-center rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-xs font-semibold text-rose-700">
-                    Offline
-                  </span>
-                )}
               </div>
 
               <div>
-                <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">
+                <h1 className="text-3xl font-semibold tracking-tight text-slate-950 md:text-4xl">
                   Clinical Medication Review
                 </h1>
-                <p className="mt-2 max-w-3xl text-sm leading-6 text-[rgb(var(--muted))]">
-                  Capture patient details, build medication sections, and
-                  prepare a clean printable review without exposing technical
-                  processing to the clinician.
+                <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600 md:text-base">
+                  Cleaner intake, editable transcript import, diagnosis-based
+                  medication workflow, and printable PDF export in English or
+                  Arabic. Humanity finally reinvented a form without making it
+                  worse. Mostly.
                 </p>
               </div>
             </div>
 
-            <div className="grid gap-2 sm:grid-cols-2 lg:w-[340px]">
+            <div className="grid w-full gap-2 sm:grid-cols-2 lg:w-[360px]">
               <button
                 type="button"
-                onClick={() => window.print()}
-                className="rounded-2xl bg-[rgb(var(--primary))] px-4 py-3 text-sm font-semibold text-white transition hover:opacity-90"
+                onClick={() => setExportOpen(true)}
+                className="rounded-2xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-blue-700"
               >
-                Print / Save PDF
+                Download PDF
               </button>
-
               <button
                 type="button"
-                onClick={() => setConfirmResetOpen(true)}
-                className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-3 text-sm font-semibold text-[rgb(var(--text))] transition hover:bg-[rgba(var(--card),0.8)]"
+                onClick={resetDraft}
+                className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-900 transition hover:bg-slate-50"
               >
                 Reset draft
               </button>
-
               <button
                 type="button"
                 onClick={() => setTab("patient")}
-                className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-3 text-sm font-semibold text-[rgb(var(--text))] transition hover:bg-[rgba(var(--card),0.8)]"
+                className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-900 transition hover:bg-slate-50"
               >
                 Patient details
               </button>
-
               <button
                 type="button"
                 onClick={() => setTab("meds")}
-                className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-3 text-sm font-semibold text-[rgb(var(--text))] transition hover:bg-[rgba(var(--card),0.8)]"
+                className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-900 transition hover:bg-slate-50"
               >
                 Medications
+              </button>
+              <button
+                type="button"
+                onClick={() => setTab("review")}
+                className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-900 transition hover:bg-slate-50 sm:col-span-2"
+              >
+                Review & preview
               </button>
             </div>
           </div>
@@ -934,151 +1379,36 @@ export default function Page() {
           resetSignal={scribeResetSignal}
         />
 
-        <section className="rounded-[28px] border border-[rgb(var(--border))] bg-[rgb(var(--surface))] p-4 shadow-sm md:p-5">
-          <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
-            <div className="flex flex-wrap gap-2">
-              {[
-                { key: "meds", label: "Medications" },
-                { key: "patient", label: "Patient" },
-                { key: "review", label: "Review & print" },
-              ].map((item) => {
-                const active = tab === item.key;
-                return (
-                  <button
-                    key={item.key}
-                    type="button"
-                    onClick={() => setTab(item.key as TabKey)}
-                    className={[
-                      "rounded-2xl px-4 py-2 text-sm font-semibold transition",
-                      active
-                        ? "bg-[rgb(var(--primary))] text-white"
-                        : "border border-[rgb(var(--border))] bg-[rgb(var(--surface))] text-[rgb(var(--text))] hover:bg-[rgba(var(--card),0.8)]",
-                    ].join(" ")}
-                  >
-                    {item.label}
-                  </button>
-                );
-              })}
-            </div>
-
-            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-end">
-              <div className="relative min-w-[240px]">
-                <input
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Search medications, systems, dose, purpose..."
-                  className="w-full rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-3 text-sm outline-none transition focus:border-[rgb(var(--primary))]"
-                />
-              </div>
-
-              <label className="inline-flex items-center gap-2 rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-3 text-sm text-[rgb(var(--text))]">
-                <input
-                  type="checkbox"
-                  checked={incompleteOnly}
-                  onChange={(e) => setIncompleteOnly(e.target.checked)}
-                />
-                Show incomplete only
-              </label>
-
-              <button
-                type="button"
-                onClick={() => setShowMore((v) => !v)}
-                className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-3 text-sm font-semibold text-[rgb(var(--text))] transition hover:bg-[rgba(var(--card),0.8)]"
-              >
-                {showMore ? "Hide advanced" : "Advanced"}
-              </button>
-            </div>
-          </div>
-
-          {showMore && (
-            <div className="mt-4 grid gap-4 rounded-3xl border border-[rgb(var(--border))] bg-[rgba(var(--card),0.8)] p-4 xl:grid-cols-[1fr_auto_auto] xl:items-end">
-              <div>
-                <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-[rgb(var(--muted))]">
-                  Add custom column
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    value={newColTitle}
-                    onChange={(e) => setNewColTitle(e.target.value)}
-                    placeholder="Example: Prescriber / Route / Supply"
-                    className="w-full rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-3 text-sm outline-none transition focus:border-[rgb(var(--primary))]"
-                  />
-                  <button
-                    type="button"
-                    onClick={addCustomColumn}
-                    className="rounded-2xl bg-[rgb(var(--primary))] px-4 py-3 text-sm font-semibold text-white transition hover:opacity-90"
-                  >
-                    Add
-                  </button>
-                </div>
-              </div>
-
-              <div>
-                <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-[rgb(var(--muted))]">
-                  Entry mode
-                </label>
-                <select
-                  value={inputMode}
-                  onChange={(e) => setInputMode(e.target.value as InputMode)}
-                  className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-3 text-sm outline-none"
-                >
-                  <option value="smart">Smart</option>
-                  <option value="pick">Pick lists</option>
-                  <option value="type">Free type</option>
-                </select>
-              </div>
-
-              <label className="inline-flex items-center gap-2 rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-3 text-sm text-[rgb(var(--text))]">
-                <input
-                  type="checkbox"
-                  checked={dense}
-                  onChange={(e) => setDense(e.target.checked)}
-                />
-                Dense table layout
-              </label>
-
-              {customColumns.length > 0 && (
-                <div className="xl:col-span-3">
-                  <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-[rgb(var(--muted))]">
-                    Custom columns
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    {customColumns.map((c) => (
-                      <span
-                        key={c.id}
-                        className="inline-flex items-center gap-2 rounded-full border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-1.5 text-sm"
-                      >
-                        {c.title}
-                        <button
-                          type="button"
-                          onClick={() => removeCustomColumn(c.id)}
-                          className="text-[rgb(var(--muted))] transition hover:text-[rgb(var(--danger))]"
-                          aria-label={`Remove ${c.title}`}
-                        >
-                          ×
-                        </button>
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
+        <section className="grid gap-4 md:grid-cols-3 xl:grid-cols-6">
+          <SummaryTile label="Patient" value={englishFallback(patientName)} />
+          <SummaryTile label="MRN" value={englishFallback(mrn)} />
+          <SummaryTile label="Occupation" value={englishFallback(occupation)} />
+          <SummaryTile
+            label="Supervising doctor"
+            value={englishFallback(supervisingDoctor)}
+          />
+          <SummaryTile label="Systems" value={String(sections.length)} />
+          <SummaryTile label="Medications" value={String(totalRows)} />
         </section>
 
         {tab === "patient" && (
-          <section className="grid gap-4 xl:grid-cols-[1.2fr_1fr]">
-            <div className="rounded-[28px] border border-[rgb(var(--border))] bg-[rgb(var(--surface))] p-5 shadow-sm">
-              <div className="mb-4">
-                <h2 className="text-lg font-semibold">Patient details</h2>
-                <p className="mt-1 text-sm text-[rgb(var(--muted))]">
-                  These fields appear in the printed report and should stay
-                  clean and clinician-facing.
+          <section className="grid gap-4 xl:grid-cols-[1.3fr_1fr]">
+            <div className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
+              <div className="mb-5">
+                <h2 className="text-xl font-semibold text-slate-950">
+                  Patient details
+                </h2>
+                <p className="mt-1 text-sm text-slate-500">
+                  Everything stays editable, whether it came from dictation or
+                  manual entry.
                 </p>
               </div>
 
               <div className="grid gap-4 md:grid-cols-2">
-                <Field label="Patient name" required>
+                <Field
+                  label="Patient name"
+                  hint="Transcript tries to convert Arabic names into English spelling."
+                >
                   <input
                     value={patientName}
                     onChange={(e) => setPatientName(e.target.value)}
@@ -1102,6 +1432,24 @@ export default function Page() {
                     value={dob}
                     onChange={(e) => setDob(e.target.value)}
                     className="field"
+                  />
+                </Field>
+
+                <Field label="Occupation">
+                  <input
+                    value={occupation}
+                    onChange={(e) => setOccupation(e.target.value)}
+                    className="field"
+                    placeholder="Patient occupation"
+                  />
+                </Field>
+
+                <Field label="Supervising doctor">
+                  <input
+                    value={supervisingDoctor}
+                    onChange={(e) => setSupervisingDoctor(e.target.value)}
+                    className="field"
+                    placeholder="Consultant or supervising physician"
                   />
                 </Field>
 
@@ -1134,19 +1482,21 @@ export default function Page() {
               </div>
             </div>
 
-            <div className="rounded-[28px] border border-[rgb(var(--border))] bg-[rgb(var(--surface))] p-5 shadow-sm">
-              <div className="mb-4">
-                <h2 className="text-lg font-semibold">History</h2>
-                <p className="mt-1 text-sm text-[rgb(var(--muted))]">
-                  Significant history imported from voice or entered manually.
+            <div className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
+              <div className="mb-5">
+                <h2 className="text-xl font-semibold text-slate-950">
+                  History
+                </h2>
+                <p className="mt-1 text-sm text-slate-500">
+                  Free-text history stays clinician-editable and prints exactly
+                  as entered.
                 </p>
               </div>
-
               <Field label="Significant history">
                 <textarea
                   value={significantHistory}
                   onChange={(e) => setSignificantHistory(e.target.value)}
-                  className="field min-h-[300px]"
+                  className="field min-h-[320px]"
                   placeholder="Relevant background, chronic conditions, prior issues..."
                 />
               </Field>
@@ -1156,451 +1506,442 @@ export default function Page() {
 
         {tab === "meds" && (
           <section className="grid gap-4 xl:grid-cols-[320px_1fr]">
-            <aside className="rounded-[28px] border border-[rgb(var(--border))] bg-[rgb(var(--surface))] p-5 shadow-sm">
-              <div className="mb-4">
-                <h2 className="text-lg font-semibold">Systems</h2>
-                <p className="mt-1 text-sm text-[rgb(var(--muted))]">
-                  Add a clinical system, then attach medications underneath it.
+            <aside className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
+              <div className="mb-5">
+                <h2 className="text-xl font-semibold text-slate-950">
+                  Medication builder
+                </h2>
+                <p className="mt-1 text-sm text-slate-500">
+                  Pick a system, then choose a diagnosis and fill medication
+                  rows without drama.
                 </p>
               </div>
 
-              <Field label="Add system">
-                <div className="flex gap-2">
-                  <select
-                    value={addSystemId}
-                    onChange={(e) => setAddSystemId(e.target.value)}
-                    className="field"
-                  >
-                    <option value="">Select system</option>
-                    {systems.map((sys) => (
-                      <option key={sys.id} value={sys.id}>
-                        {sys.name}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    onClick={() => addSystemSection(addSystemId)}
-                    className="rounded-2xl bg-[rgb(var(--primary))] px-4 py-3 text-sm font-semibold text-white transition hover:opacity-90"
-                  >
-                    Add
-                  </button>
-                </div>
-              </Field>
-
-              <div className="mt-5 space-y-2">
-                {sections.length === 0 ? (
-                  <div className="rounded-2xl border border-dashed border-[rgb(var(--border))] bg-[rgba(var(--card),0.8)] px-4 py-4 text-sm text-[rgb(var(--muted))]">
-                    No systems added yet.
+              <div className="space-y-4">
+                <Field label="Add system">
+                  <div className="flex gap-2">
+                    <select
+                      value={addSystemId}
+                      onChange={(e) => setAddSystemId(e.target.value)}
+                      className="field"
+                    >
+                      <option value="">Select system</option>
+                      {systems.map((system) => (
+                        <option key={system.id} value={system.id}>
+                          {system.name}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => addSection(addSystemId)}
+                      className="rounded-2xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-blue-700"
+                    >
+                      Add
+                    </button>
                   </div>
+                </Field>
+
+                <Field label="Search within medications">
+                  <input
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    className="field"
+                    placeholder="Search medication, diagnosis, plan..."
+                  />
+                </Field>
+
+                <label className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={incompleteOnly}
+                    onChange={(e) => setIncompleteOnly(e.target.checked)}
+                    className="h-4 w-4 rounded border-slate-300 text-blue-600"
+                  />
+                  Show incomplete rows only
+                </label>
+              </div>
+
+              <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
+                {systemsLoaded ? (
+                  <>
+                    <div className="font-semibold text-slate-900">
+                      {sections.length} systems
+                    </div>
+                    <div className="mt-1">
+                      {totalRows} medication rows in this draft.
+                    </div>
+                  </>
                 ) : (
-                  sections.map((sec) => {
-                    const sys = systemById.get(sec.systemId);
-                    const active = filteredSections.some(
-                      (x) => x.id === sec.id,
-                    );
-                    return (
-                      <button
-                        key={sec.id}
-                        type="button"
-                        onClick={() => {
-                          setTab("meds");
-                          const el = document.getElementById(
-                            `section-${sec.id}`,
-                          );
-                          el?.scrollIntoView({
-                            behavior: "smooth",
-                            block: "start",
-                          });
-                        }}
-                        className={[
-                          "w-full rounded-2xl border px-4 py-3 text-left transition",
-                          active
-                            ? "border-[rgb(var(--primary))] bg-[rgb(var(--primary-soft))]"
-                            : "border-[rgb(var(--border))] bg-[rgb(var(--surface))] hover:bg-[rgba(var(--card),0.8)]",
-                        ].join(" ")}
-                      >
-                        <div className="text-sm font-semibold">
-                          {sys?.name ?? "Unknown system"}
-                        </div>
-                        <div className="mt-1 text-xs text-[rgb(var(--muted))]">
-                          {sec.rows.length} medication
-                          {sec.rows.length !== 1 ? "s" : ""}
-                        </div>
-                      </button>
-                    );
-                  })
+                  "Loading systems..."
                 )}
               </div>
             </aside>
+
             <div className="space-y-4">
               {filteredSections.length === 0 ? (
-                <div className="rounded-[28px] border border-dashed border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-6 py-12 text-center shadow-sm">
-                  <div className="text-lg font-semibold">
-                    No matching medication sections
-                  </div>
-                  <p className="mt-2 text-sm text-[rgb(var(--muted))]">
-                    Add a system from the left panel or import medications from
-                    Voice Intake.
-                  </p>
+                <div className="rounded-[28px] border border-dashed border-slate-300 bg-white p-10 text-center text-sm text-slate-500 shadow-sm">
+                  No systems yet. Add one from the left and the table stops
+                  being a barren wasteland.
                 </div>
               ) : (
-                filteredSections.map((sec) => {
-                  const sys = systemById.get(sec.systemId);
-                  const templates = sys?.row_templates ?? [];
+                filteredSections.map((section) => {
+                  const system = systemById.get(section.systemId);
+                  const diagnosisOptions = system?.diagnoses ?? [];
 
                   return (
-                    <section
-                      key={sec.id}
-                      id={`section-${sec.id}`}
-                      className="rounded-[28px] border border-[rgb(var(--border))] bg-[rgb(var(--surface))] p-4 shadow-sm md:p-5"
+                    <div
+                      key={section.id}
+                      className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm"
                     >
-                      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                        <div className="space-y-3">
-                          <div>
-                            <h3 className="text-lg font-semibold">
-                              {sys?.name ?? "System"}
-                            </h3>
-                            <p className="mt-1 text-sm text-[rgb(var(--muted))]">
-                              Manage medications under this system.
-                            </p>
-                          </div>
+                      <div className="flex flex-col gap-3 border-b border-slate-200 pb-5 lg:flex-row lg:items-end lg:justify-between">
+                        <div className="grid flex-1 gap-4 md:grid-cols-[1fr_260px]">
+                          <Field label="System">
+                            <select
+                              value={section.systemId}
+                              onChange={(e) =>
+                                updateSection(section.id, {
+                                  systemId: e.target.value,
+                                  diagnosis: "",
+                                })
+                              }
+                              className="field"
+                            >
+                              <option value="">Select system</option>
+                              {systems.map((entry) => (
+                                <option key={entry.id} value={entry.id}>
+                                  {entry.name}
+                                </option>
+                              ))}
+                            </select>
+                          </Field>
 
-                          <div className="grid gap-3 sm:grid-cols-2">
-                            <Field label="Diagnosis">
-                              <input
-                                value={sec.diagnosis}
-                                onChange={(e) =>
-                                  setSections((prev) =>
-                                    prev.map((s) =>
-                                      s.id === sec.id
-                                        ? { ...s, diagnosis: e.target.value }
-                                        : s,
-                                    ),
-                                  )
-                                }
-                                className="field"
-                                placeholder="Diagnosis"
-                              />
-                            </Field>
-
-                            <Field label="Diagnosis date">
-                              <input
-                                type="date"
-                                value={sec.diagnosisDate}
-                                onChange={(e) =>
-                                  setSections((prev) =>
-                                    prev.map((s) =>
-                                      s.id === sec.id
-                                        ? {
-                                            ...s,
-                                            diagnosisDate: e.target.value,
-                                          }
-                                        : s,
-                                    ),
-                                  )
-                                }
-                                className="field"
-                              />
-                            </Field>
-                          </div>
+                          <Field label="Diagnosis date if available">
+                            <input
+                              value={section.diagnosisDate}
+                              onChange={(e) =>
+                                updateSection(section.id, {
+                                  diagnosisDate: e.target.value,
+                                })
+                              }
+                              className="field"
+                              placeholder="Optional"
+                            />
+                          </Field>
                         </div>
 
                         <div className="flex flex-wrap gap-2">
                           <button
                             type="button"
-                            onClick={() => openAddRow(sec.id)}
-                            className="rounded-2xl bg-[rgb(var(--primary))] px-4 py-2 text-sm font-semibold text-white transition hover:opacity-90"
+                            onClick={() => addMedicationRow(section.id)}
+                            className="rounded-2xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-blue-700"
                           >
-                            Add medication
+                            Add medication row
                           </button>
-
                           <button
                             type="button"
-                            onClick={() => removeSystemSection(sec.id)}
-                            className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-2 text-sm font-semibold text-[rgb(var(--danger))] transition hover:bg-[rgba(var(--card),0.8)]"
+                            onClick={() => removeSection(section.id)}
+                            className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-semibold text-rose-700 transition hover:bg-rose-100"
                           >
                             Remove system
                           </button>
                         </div>
                       </div>
 
-                      {templates.length > 0 && (
-                        <div className="mt-4 rounded-3xl border border-[rgb(var(--border))] bg-[rgba(var(--card),0.75)] p-4">
-                          <div className="text-xs font-semibold uppercase tracking-wide text-[rgb(var(--muted))]">
-                            Quick templates
-                          </div>
-                          <div className="mt-3 flex flex-wrap gap-2">
-                            {templates.map((t, idx) => {
-                              const medName =
-                                t.medication_options?.[0] ||
-                                `Template ${idx + 1}`;
-                              return (
-                                <button
-                                  key={`${sec.id}-template-${idx}`}
-                                  type="button"
-                                  onClick={() => {
-                                    openAddRow(sec.id);
-                                    setTimeout(() => {
-                                      applyTemplateToEditor(sec.id, idx);
-                                    }, 0);
-                                  }}
-                                  className="rounded-full border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-1.5 text-sm font-medium transition hover:bg-[rgba(var(--primary),0.08)]"
-                                >
-                                  {medName}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      )}
-
-                      <div className="mt-4">
-                        {sec.rows.length === 0 ? (
-                          <div className="rounded-2xl border border-dashed border-[rgb(var(--border))] bg-[rgba(var(--card),0.6)] px-4 py-8 text-center text-sm text-[rgb(var(--muted))]">
-                            No medications added in this system yet.
-                          </div>
-                        ) : (
+                      <div className="mt-5">
+                        <Field label="Diagnosis">
                           <>
-                            <div className="hidden overflow-x-auto lg:block">
-                              <table
-                                className={[
-                                  "w-full min-w-[980px] border-separate border-spacing-0 overflow-hidden rounded-3xl border border-[rgb(var(--border))]",
-                                  dense ? "text-[13px]" : "text-sm",
-                                ].join(" ")}
-                              >
-                                <thead>
-                                  <tr className="bg-[rgba(var(--card),0.8)] text-left text-[rgb(var(--muted))]">
-                                    <th className="border-b border-[rgb(var(--border))] px-4 py-3 font-semibold">
-                                      Medication
-                                    </th>
-                                    <th className="border-b border-[rgb(var(--border))] px-4 py-3 font-semibold">
-                                      Dose
-                                    </th>
-                                    <th className="border-b border-[rgb(var(--border))] px-4 py-3 font-semibold">
-                                      How
-                                    </th>
-                                    <th className="border-b border-[rgb(var(--border))] px-4 py-3 font-semibold">
-                                      Purpose
-                                    </th>
-                                    <th className="border-b border-[rgb(var(--border))] px-4 py-3 font-semibold">
-                                      Plan
-                                    </th>
-                                    {customColumns.map((c) => (
-                                      <th
-                                        key={c.id}
-                                        className="border-b border-[rgb(var(--border))] px-4 py-3 font-semibold"
-                                      >
-                                        {c.title}
-                                      </th>
-                                    ))}
-                                    <th className="border-b border-[rgb(var(--border))] px-4 py-3 font-semibold">
-                                      Actions
-                                    </th>
-                                  </tr>
-                                </thead>
-
-                                <tbody>
-                                  {sec.rows.map((row, idx) => (
-                                    <tr
-                                      key={row.id}
-                                      className={
-                                        idx % 2 === 0
-                                          ? "bg-[rgb(var(--surface))]"
-                                          : "bg-[rgba(var(--card),0.5)]"
-                                      }
-                                    >
-                                      <td className="border-b border-[rgb(var(--border))] px-4 py-3 align-top">
-                                        <div className="font-semibold">
-                                          {row.medication || (
-                                            <span className="text-[rgb(var(--muted))]">
-                                              —
-                                            </span>
-                                          )}
-                                        </div>
-                                      </td>
-                                      <td className="border-b border-[rgb(var(--border))] px-4 py-3 align-top">
-                                        {row.dose || (
-                                          <span className="text-[rgb(var(--muted))]">
-                                            —
-                                          </span>
-                                        )}
-                                      </td>
-                                      <td className="border-b border-[rgb(var(--border))] px-4 py-3 align-top">
-                                        {row.how || (
-                                          <span className="text-[rgb(var(--muted))]">
-                                            —
-                                          </span>
-                                        )}
-                                      </td>
-                                      <td className="border-b border-[rgb(var(--border))] px-4 py-3 align-top">
-                                        {row.purpose || (
-                                          <span className="text-[rgb(var(--muted))]">
-                                            —
-                                          </span>
-                                        )}
-                                      </td>
-                                      <td className="border-b border-[rgb(var(--border))] px-4 py-3 align-top">
-                                        {row.plan || (
-                                          <span className="text-[rgb(var(--muted))]">
-                                            —
-                                          </span>
-                                        )}
-                                      </td>
-
-                                      {customColumns.map((c) => (
-                                        <td
-                                          key={`${row.id}-${c.id}`}
-                                          className="border-b border-[rgb(var(--border))] px-4 py-3 align-top"
-                                        >
-                                          {row.extra?.[c.id] || (
-                                            <span className="text-[rgb(var(--muted))]">
-                                              —
-                                            </span>
-                                          )}
-                                        </td>
-                                      ))}
-
-                                      <td className="border-b border-[rgb(var(--border))] px-4 py-3 align-top">
-                                        <div className="flex flex-wrap gap-2">
-                                          <button
-                                            type="button"
-                                            onClick={() =>
-                                              openEditRow(sec.id, row.id)
-                                            }
-                                            className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-2 text-xs font-semibold transition hover:bg-[rgba(var(--card),0.8)]"
-                                          >
-                                            Edit
-                                          </button>
-
-                                          <button
-                                            type="button"
-                                            onClick={() =>
-                                              duplicateRow(sec.id, row.id)
-                                            }
-                                            className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-2 text-xs font-semibold transition hover:bg-[rgba(var(--card),0.8)]"
-                                          >
-                                            Duplicate
-                                          </button>
-
-                                          <button
-                                            type="button"
-                                            onClick={() =>
-                                              moveRow(sec.id, row.id, -1)
-                                            }
-                                            className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-2 text-xs font-semibold transition hover:bg-[rgba(var(--card),0.8)]"
-                                          >
-                                            ↑
-                                          </button>
-
-                                          <button
-                                            type="button"
-                                            onClick={() =>
-                                              moveRow(sec.id, row.id, 1)
-                                            }
-                                            className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-2 text-xs font-semibold transition hover:bg-[rgba(var(--card),0.8)]"
-                                          >
-                                            ↓
-                                          </button>
-
-                                          <button
-                                            type="button"
-                                            onClick={() =>
-                                              removeRow(sec.id, row.id)
-                                            }
-                                            className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-2 text-xs font-semibold text-[rgb(var(--danger))] transition hover:bg-[rgba(var(--card),0.8)]"
-                                          >
-                                            Delete
-                                          </button>
-                                        </div>
-                                      </td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-
-                            <div className="grid gap-3 lg:hidden">
-                              {sec.rows.map((row) => (
-                                <div
-                                  key={row.id}
-                                  className="rounded-3xl border border-[rgb(var(--border))] bg-[rgba(var(--card),0.7)] p-4"
-                                >
-                                  <div className="flex items-start justify-between gap-3">
-                                    <div>
-                                      <div className="text-sm font-semibold">
-                                        {row.medication ||
-                                          "Untitled medication"}
-                                      </div>
-                                      <div className="mt-1 text-xs text-[rgb(var(--muted))]">
-                                        {row.dose || "No dose"} •{" "}
-                                        {row.plan || "No plan"}
-                                      </div>
-                                    </div>
-
-                                    <div className="flex flex-wrap gap-2">
-                                      <button
-                                        type="button"
-                                        onClick={() =>
-                                          openEditRow(sec.id, row.id)
-                                        }
-                                        className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-2 text-xs font-semibold"
-                                      >
-                                        Edit
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() =>
-                                          duplicateRow(sec.id, row.id)
-                                        }
-                                        className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-2 text-xs font-semibold"
-                                      >
-                                        Duplicate
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() =>
-                                          removeRow(sec.id, row.id)
-                                        }
-                                        className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-2 text-xs font-semibold text-[rgb(var(--danger))]"
-                                      >
-                                        Delete
-                                      </button>
-                                    </div>
-                                  </div>
-
-                                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                                    <SummaryTile
-                                      label="Dose"
-                                      value={row.dose || "—"}
-                                    />
-                                    <SummaryTile
-                                      label="How"
-                                      value={row.how || "—"}
-                                    />
-                                    <SummaryTile
-                                      label="Purpose"
-                                      value={row.purpose || "—"}
-                                    />
-                                    <SummaryTile
-                                      label="Plan"
-                                      value={row.plan || "—"}
-                                    />
-                                    {customColumns.map((c) => (
-                                      <SummaryTile
-                                        key={`${row.id}-${c.id}-mobile`}
-                                        label={c.title}
-                                        value={row.extra?.[c.id] || "—"}
-                                      />
-                                    ))}
-                                  </div>
-                                </div>
+                            <input
+                              value={section.diagnosis}
+                              onChange={(e) =>
+                                updateSection(section.id, {
+                                  diagnosis: e.target.value,
+                                })
+                              }
+                              list={`diagnosis-list-${section.id}`}
+                              className="field"
+                              placeholder="Select or type a diagnosis"
+                            />
+                            <datalist id={`diagnosis-list-${section.id}`}>
+                              {diagnosisOptions.map((diagnosis) => (
+                                <option key={diagnosis} value={diagnosis} />
                               ))}
-                            </div>
+                            </datalist>
                           </>
-                        )}
+                        </Field>
                       </div>
-                    </section>
+
+                      <div className="mt-5 hidden overflow-x-auto rounded-3xl border border-slate-200 lg:block">
+                        <table className="min-w-[1180px] divide-y divide-slate-200">
+                          <thead className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">
+                            <tr>
+                              <th className="px-4 py-3">Medication</th>
+                              <th className="px-4 py-3">Dose</th>
+                              <th className="px-4 py-3">How to take</th>
+                              <th className="px-4 py-3">Used for</th>
+                              <th className="px-4 py-3">
+                                Agreed plan / next review
+                              </th>
+                              <th className="px-4 py-3">Actions</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-200 bg-white">
+                            {section.rows.map((row) => (
+                              <tr key={row.id} className="align-top">
+                                <td className="px-4 py-4">
+                                  <input
+                                    value={row.medication}
+                                    onChange={(e) =>
+                                      updateRow(section.id, row.id, {
+                                        medication: e.target.value,
+                                      })
+                                    }
+                                    list={`med-list-${row.id}`}
+                                    className="field"
+                                    placeholder="Medication name"
+                                  />
+                                  <datalist id={`med-list-${row.id}`}>
+                                    {allMedicationSuggestions.map((value) => (
+                                      <option key={value} value={value} />
+                                    ))}
+                                  </datalist>
+                                </td>
+                                <td className="px-4 py-4">
+                                  <input
+                                    value={row.dose}
+                                    onChange={(e) =>
+                                      updateRow(section.id, row.id, {
+                                        dose: e.target.value,
+                                      })
+                                    }
+                                    list={`dose-list-${row.id}`}
+                                    className="field"
+                                    placeholder="Dose"
+                                  />
+                                  <datalist id={`dose-list-${row.id}`}>
+                                    {allDoseSuggestions.map((value) => (
+                                      <option key={value} value={value} />
+                                    ))}
+                                  </datalist>
+                                </td>
+                                <td className="px-4 py-4">
+                                  <input
+                                    value={row.how}
+                                    onChange={(e) =>
+                                      updateRow(section.id, row.id, {
+                                        how: e.target.value,
+                                      })
+                                    }
+                                    list={`how-list-${row.id}`}
+                                    className="field"
+                                    placeholder="How to take"
+                                  />
+                                  <datalist id={`how-list-${row.id}`}>
+                                    {allHowSuggestions.map((value) => (
+                                      <option key={value} value={value} />
+                                    ))}
+                                  </datalist>
+                                </td>
+                                <td className="px-4 py-4">
+                                  <input
+                                    value={row.purpose}
+                                    onChange={(e) =>
+                                      updateRow(section.id, row.id, {
+                                        purpose: e.target.value,
+                                      })
+                                    }
+                                    list={`purpose-list-${row.id}`}
+                                    className="field"
+                                    placeholder="Optional"
+                                  />
+                                  <datalist id={`purpose-list-${row.id}`}>
+                                    {allPurposeSuggestions.map((value) => (
+                                      <option key={value} value={value} />
+                                    ))}
+                                  </datalist>
+                                </td>
+                                <td className="px-4 py-4">
+                                  <input
+                                    value={row.plan}
+                                    onChange={(e) =>
+                                      updateRow(section.id, row.id, {
+                                        plan: e.target.value,
+                                      })
+                                    }
+                                    list={`plan-list-${row.id}`}
+                                    className="field"
+                                    placeholder="Optional"
+                                  />
+                                  <datalist id={`plan-list-${row.id}`}>
+                                    {allPlanSuggestions.map((value) => (
+                                      <option key={value} value={value} />
+                                    ))}
+                                  </datalist>
+                                </td>
+                                <td className="px-4 py-4">
+                                  <div className="flex flex-wrap gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        duplicateRow(section.id, row.id)
+                                      }
+                                      className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
+                                    >
+                                      Duplicate
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        removeRow(section.id, row.id)
+                                      }
+                                      className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 transition hover:bg-rose-100"
+                                    >
+                                      Delete
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      <div className="mt-5 space-y-3 lg:hidden">
+                        {section.rows.map((row, index) => (
+                          <div
+                            key={row.id}
+                            className="rounded-3xl border border-slate-200 bg-slate-50 p-4"
+                          >
+                            <div className="mb-3 flex items-center justify-between">
+                              <div className="text-sm font-semibold text-slate-900">
+                                Medication row {index + 1}
+                              </div>
+                              <div className="flex gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    duplicateRow(section.id, row.id)
+                                  }
+                                  className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700"
+                                >
+                                  Duplicate
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => removeRow(section.id, row.id)}
+                                  className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700"
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            </div>
+
+                            <div className="grid gap-4 md:grid-cols-2">
+                              <Field label="Medication">
+                                <>
+                                  <input
+                                    value={row.medication}
+                                    onChange={(e) =>
+                                      updateRow(section.id, row.id, {
+                                        medication: e.target.value,
+                                      })
+                                    }
+                                    list={`med-mobile-${row.id}`}
+                                    className="field"
+                                    placeholder="Medication name"
+                                  />
+                                  <datalist id={`med-mobile-${row.id}`}>
+                                    {allMedicationSuggestions.map((value) => (
+                                      <option key={value} value={value} />
+                                    ))}
+                                  </datalist>
+                                </>
+                              </Field>
+                              <Field label="Dose">
+                                <>
+                                  <input
+                                    value={row.dose}
+                                    onChange={(e) =>
+                                      updateRow(section.id, row.id, {
+                                        dose: e.target.value,
+                                      })
+                                    }
+                                    list={`dose-mobile-${row.id}`}
+                                    className="field"
+                                    placeholder="Dose"
+                                  />
+                                  <datalist id={`dose-mobile-${row.id}`}>
+                                    {allDoseSuggestions.map((value) => (
+                                      <option key={value} value={value} />
+                                    ))}
+                                  </datalist>
+                                </>
+                              </Field>
+                              <Field label="How to take">
+                                <>
+                                  <input
+                                    value={row.how}
+                                    onChange={(e) =>
+                                      updateRow(section.id, row.id, {
+                                        how: e.target.value,
+                                      })
+                                    }
+                                    list={`how-mobile-${row.id}`}
+                                    className="field"
+                                    placeholder="How to take"
+                                  />
+                                  <datalist id={`how-mobile-${row.id}`}>
+                                    {allHowSuggestions.map((value) => (
+                                      <option key={value} value={value} />
+                                    ))}
+                                  </datalist>
+                                </>
+                              </Field>
+                              <Field label="Used for">
+                                <>
+                                  <input
+                                    value={row.purpose}
+                                    onChange={(e) =>
+                                      updateRow(section.id, row.id, {
+                                        purpose: e.target.value,
+                                      })
+                                    }
+                                    list={`purpose-mobile-${row.id}`}
+                                    className="field"
+                                    placeholder="Optional"
+                                  />
+                                  <datalist id={`purpose-mobile-${row.id}`}>
+                                    {allPurposeSuggestions.map((value) => (
+                                      <option key={value} value={value} />
+                                    ))}
+                                  </datalist>
+                                </>
+                              </Field>
+                              <Field label="Agreed plan / next review">
+                                <>
+                                  <input
+                                    value={row.plan}
+                                    onChange={(e) =>
+                                      updateRow(section.id, row.id, {
+                                        plan: e.target.value,
+                                      })
+                                    }
+                                    list={`plan-mobile-${row.id}`}
+                                    className="field"
+                                    placeholder="Optional"
+                                  />
+                                  <datalist id={`plan-mobile-${row.id}`}>
+                                    {allPlanSuggestions.map((value) => (
+                                      <option key={value} value={value} />
+                                    ))}
+                                  </datalist>
+                                </>
+                              </Field>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
                   );
                 })
               )}
@@ -1609,37 +1950,29 @@ export default function Page() {
         )}
 
         {tab === "review" && (
-          <section className="grid gap-4 xl:grid-cols-[360px_1fr]">
+          <section className="grid gap-4 xl:grid-cols-[1fr_1.15fr]">
             <div className="space-y-4">
-              <div className="rounded-[28px] border border-[rgb(var(--border))] bg-[rgb(var(--surface))] p-5 shadow-sm">
-                <h2 className="text-lg font-semibold">Review summary</h2>
-                <p className="mt-1 text-sm text-[rgb(var(--muted))]">
-                  Final printable snapshot before exporting.
-                </p>
-
-                <div className="mt-4 grid gap-3">
-                  <SummaryTile
-                    label="Patient"
-                    value={patientName || "Not entered"}
-                  />
-                  <SummaryTile label="MRN" value={mrn || "Not entered"} />
-                  <SummaryTile
-                    label="Review date"
-                    value={reviewDate || "Not entered"}
-                  />
-                  <SummaryTile
-                    label="Completed by"
-                    value={reviewCompletedBy || "Not entered"}
-                  />
-                  <SummaryTile label="Systems" value={`${sections.length}`} />
-                  <SummaryTile label="Medications" value={`${totalRows}`} />
+              <div className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="mb-5">
+                  <h2 className="text-xl font-semibold text-slate-950">
+                    Review details
+                  </h2>
+                  <p className="mt-1 text-sm text-slate-500">
+                    These fields also stay editable even if transcript import
+                    filled them first.
+                  </p>
                 </div>
-              </div>
 
-              <div className="rounded-[28px] border border-[rgb(var(--border))] bg-[rgb(var(--surface))] p-5 shadow-sm">
-                <h2 className="text-lg font-semibold">Review notes</h2>
-                <div className="mt-4 grid gap-4">
-                  <Field label="Review completed by" required>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <Field label="Review date">
+                    <input
+                      type="date"
+                      value={reviewDate}
+                      onChange={(e) => setReviewDate(e.target.value)}
+                      className="field"
+                    />
+                  </Field>
+                  <Field label="Review completed by">
                     <input
                       value={reviewCompletedBy}
                       onChange={(e) => setReviewCompletedBy(e.target.value)}
@@ -1647,43 +1980,40 @@ export default function Page() {
                       placeholder="Clinician name"
                     />
                   </Field>
+                  <Field label="Next review date">
+                    <input
+                      type="date"
+                      value={nextReviewDate}
+                      onChange={(e) => setNextReviewDate(e.target.value)}
+                      className="field"
+                    />
+                  </Field>
+                  <Field label="Mode">
+                    <select
+                      value={nextReviewMode}
+                      onChange={(e) =>
+                        setNextReviewMode(
+                          e.target.value as "" | "In-person" | "Video",
+                        )
+                      }
+                      className="field"
+                    >
+                      <option value="">Select mode</option>
+                      <option value="In-person">In-person</option>
+                      <option value="Video">Video</option>
+                    </select>
+                  </Field>
+                </div>
 
+                <div className="mt-4 grid gap-4">
                   <Field label="Treatment goals">
                     <textarea
                       value={treatmentGoals}
                       onChange={(e) => setTreatmentGoals(e.target.value)}
-                      className="field min-h-[140px]"
+                      className="field min-h-[120px]"
                       placeholder="Treatment goals"
                     />
                   </Field>
-
-                  <div className="grid gap-4 sm:grid-cols-2">
-                    <Field label="Next review date">
-                      <input
-                        type="date"
-                        value={nextReviewDate}
-                        onChange={(e) => setNextReviewDate(e.target.value)}
-                        className="field"
-                      />
-                    </Field>
-
-                    <Field label="Mode">
-                      <select
-                        value={nextReviewMode}
-                        onChange={(e) =>
-                          setNextReviewMode(
-                            e.target.value as "" | "In-person" | "Video",
-                          )
-                        }
-                        className="field"
-                      >
-                        <option value="">Select mode</option>
-                        <option value="In-person">In-person</option>
-                        <option value="Video">Video</option>
-                      </select>
-                    </Field>
-                  </div>
-
                   <Field label="Before next review">
                     <textarea
                       value={beforeNextReview}
@@ -1692,7 +2022,6 @@ export default function Page() {
                       placeholder="Tasks before next review"
                     />
                   </Field>
-
                   <Field label="Notes">
                     <textarea
                       value={notes}
@@ -1705,909 +2034,234 @@ export default function Page() {
               </div>
             </div>
 
-            <div className="rounded-[28px] border border-[rgb(var(--border))] bg-white p-6 shadow-sm print:shadow-none">
-              <div className="border-b border-[rgb(var(--border))] pb-4">
-                <h2 className="text-2xl font-semibold">
-                  Clinical Medication Review
-                </h2>
-                <p className="mt-1 text-sm text-[rgb(var(--muted))]">
-                  Printable report preview
-                </p>
+            <div className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
+              <div className="flex flex-col gap-2 border-b border-slate-200 pb-4 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h2 className="text-2xl font-semibold text-slate-950">
+                    Printable preview
+                  </h2>
+                  <p className="mt-1 text-sm text-slate-500">
+                    English preview. Arabic version is generated at export time.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setExportOpen(true)}
+                  className="rounded-2xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-blue-700"
+                >
+                  Download PDF
+                </button>
               </div>
 
               <div className="mt-5 grid gap-4 sm:grid-cols-2">
-                <SummaryTile label="Patient name" value={patientName || "—"} />
-                <SummaryTile label="Date of birth" value={dob || "—"} />
-                <SummaryTile label="MRN / case number" value={mrn || "—"} />
-                <SummaryTile label="Carer" value={carer || "—"} />
-              </div>
-
-              <div className="mt-6 grid gap-4 sm:grid-cols-2">
-                <SummaryTile label="Allergies" value={allergies || "—"} />
-                <SummaryTile label="Intolerances" value={intolerances || "—"} />
+                <SummaryTile
+                  label="Patient name"
+                  value={previewPayload.patientName || "—"}
+                />
+                <SummaryTile
+                  label="Date of birth"
+                  value={previewPayload.dob || "—"}
+                />
+                <SummaryTile
+                  label="MRN / case number"
+                  value={previewPayload.mrn || "—"}
+                />
+                <SummaryTile
+                  label="Occupation"
+                  value={previewPayload.occupation || "—"}
+                />
+                <SummaryTile
+                  label="Supervising doctor"
+                  value={previewPayload.supervisingDoctor || "—"}
+                />
+                <SummaryTile
+                  label="Carer"
+                  value={previewPayload.carer || "—"}
+                />
+                <SummaryTile
+                  label="Allergies"
+                  value={previewPayload.allergies || "—"}
+                />
+                <SummaryTile
+                  label="Intolerances"
+                  value={previewPayload.intolerances || "—"}
+                />
               </div>
 
               <div className="mt-6">
-                <div className="text-sm font-semibold uppercase tracking-wide text-[rgb(var(--muted))]">
+                <div className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">
                   Significant history
                 </div>
-                <div className="mt-2 whitespace-pre-wrap rounded-2xl border border-[rgb(var(--border))] bg-[rgba(var(--card),0.7)] p-4 text-sm">
-                  {significantHistory || "—"}
+                <div className="mt-2 whitespace-pre-wrap rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-800">
+                  {previewPayload.significantHistory || "—"}
                 </div>
               </div>
 
-              <div className="mt-6">
-                <div className="text-sm font-semibold uppercase tracking-wide text-[rgb(var(--muted))]">
-                  Medications by system
-                </div>
-
-                <div className="mt-3 space-y-4">
-                  {sections.length === 0 ? (
-                    <div className="rounded-2xl border border-dashed border-[rgb(var(--border))] bg-[rgba(var(--card),0.65)] p-5 text-sm text-[rgb(var(--muted))]">
-                      No medication systems added yet.
-                    </div>
-                  ) : (
-                    sections.map((sec) => {
-                      const sys = systemById.get(sec.systemId);
-
-                      return (
-                        <div
-                          key={`review-${sec.id}`}
-                          className="rounded-3xl border border-[rgb(var(--border))] bg-[rgba(var(--card),0.6)] p-4"
+              <div className="mt-6 overflow-hidden rounded-3xl border border-slate-200">
+                <table className="min-w-full divide-y divide-slate-200">
+                  <thead className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">
+                    <tr>
+                      <th className="px-4 py-3">System</th>
+                      <th className="px-4 py-3">
+                        Diagnosis and date if available
+                      </th>
+                      <th className="px-4 py-3">Medication & Dose</th>
+                      <th className="px-4 py-3">How to take</th>
+                      <th className="px-4 py-3">What are they for?</th>
+                      <th className="px-4 py-3">Agreed Plan / Next Review</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200 bg-white text-sm text-slate-800">
+                    {previewPayload.rows.length ? (
+                      previewPayload.rows.map((row, index) => (
+                        <tr key={`${row.system}-${row.medication}-${index}`}>
+                          <td className="px-4 py-3">{row.system || "—"}</td>
+                          <td className="px-4 py-3">
+                            {[row.diagnosis, row.diagnosisDate]
+                              .filter(Boolean)
+                              .join(" • ") || "—"}
+                          </td>
+                          <td className="px-4 py-3">
+                            {[row.medication, row.dose]
+                              .filter(Boolean)
+                              .join(" • ") || "—"}
+                          </td>
+                          <td className="px-4 py-3">{row.how || "—"}</td>
+                          <td className="px-4 py-3">{row.purpose || "—"}</td>
+                          <td className="px-4 py-3">{row.plan || "—"}</td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td
+                          colSpan={6}
+                          className="px-4 py-8 text-center text-slate-500"
                         >
-                          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                            <div>
-                              <div className="font-semibold">
-                                {sys?.name ?? "System"}
-                              </div>
-                              <div className="mt-1 text-xs text-[rgb(var(--muted))]">
-                                Diagnosis: {sec.diagnosis || "—"} • Date:{" "}
-                                {sec.diagnosisDate || "—"}
-                              </div>
-                            </div>
-                            <div className="text-xs font-medium text-[rgb(var(--muted))]">
-                              {sec.rows.length} medication
-                              {sec.rows.length === 1 ? "" : "s"}
-                            </div>
-                          </div>
-
-                          {sec.rows.length > 0 ? (
-                            <div className="mt-4 overflow-x-auto">
-                              <table className="w-full min-w-[720px] border-separate border-spacing-0 text-sm">
-                                <thead>
-                                  <tr className="text-left text-[rgb(var(--muted))]">
-                                    <th className="border-b border-[rgb(var(--border))] px-3 py-2 font-semibold">
-                                      Medication
-                                    </th>
-                                    <th className="border-b border-[rgb(var(--border))] px-3 py-2 font-semibold">
-                                      Dose
-                                    </th>
-                                    <th className="border-b border-[rgb(var(--border))] px-3 py-2 font-semibold">
-                                      How
-                                    </th>
-                                    <th className="border-b border-[rgb(var(--border))] px-3 py-2 font-semibold">
-                                      Purpose
-                                    </th>
-                                    <th className="border-b border-[rgb(var(--border))] px-3 py-2 font-semibold">
-                                      Plan
-                                    </th>
-                                    {customColumns.map((c) => (
-                                      <th
-                                        key={`review-${sec.id}-${c.id}`}
-                                        className="border-b border-[rgb(var(--border))] px-3 py-2 font-semibold"
-                                      >
-                                        {c.title}
-                                      </th>
-                                    ))}
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {sec.rows.map((row) => (
-                                    <tr key={`review-row-${row.id}`}>
-                                      <td className="border-b border-[rgb(var(--border))] px-3 py-2">
-                                        {row.medication || "—"}
-                                      </td>
-                                      <td className="border-b border-[rgb(var(--border))] px-3 py-2">
-                                        {row.dose || "—"}
-                                      </td>
-                                      <td className="border-b border-[rgb(var(--border))] px-3 py-2">
-                                        {row.how || "—"}
-                                      </td>
-                                      <td className="border-b border-[rgb(var(--border))] px-3 py-2">
-                                        {row.purpose || "—"}
-                                      </td>
-                                      <td className="border-b border-[rgb(var(--border))] px-3 py-2">
-                                        {row.plan || "—"}
-                                      </td>
-                                      {customColumns.map((c) => (
-                                        <td
-                                          key={`review-row-${row.id}-${c.id}`}
-                                          className="border-b border-[rgb(var(--border))] px-3 py-2"
-                                        >
-                                          {row.extra?.[c.id] || "—"}
-                                        </td>
-                                      ))}
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          ) : (
-                            <div className="mt-3 text-sm text-[rgb(var(--muted))]">
-                              No medications in this system.
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
+                          No medication rows added yet.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
               </div>
 
               <div className="mt-6 grid gap-4 sm:grid-cols-2">
                 <SummaryTile
-                  label="This review date"
-                  value={reviewDate || "—"}
+                  label="Review date"
+                  value={previewPayload.reviewDate || "—"}
                 />
                 <SummaryTile
                   label="Review completed by"
-                  value={reviewCompletedBy || "—"}
+                  value={previewPayload.reviewCompletedBy || "—"}
                 />
                 <SummaryTile
-                  label="Next review date"
-                  value={nextReviewDate || "—"}
+                  label="Treatment goals"
+                  value={previewPayload.treatmentGoals || "—"}
                 />
-                <SummaryTile label="Mode" value={nextReviewMode || "—"} />
-              </div>
-
-              <div className="mt-6">
-                <div className="text-sm font-semibold uppercase tracking-wide text-[rgb(var(--muted))]">
-                  Treatment goals
-                </div>
-                <div className="mt-2 whitespace-pre-wrap rounded-2xl border border-[rgb(var(--border))] bg-[rgba(var(--card),0.7)] p-4 text-sm">
-                  {treatmentGoals || "—"}
-                </div>
-              </div>
-
-              <div className="mt-6">
-                <div className="text-sm font-semibold uppercase tracking-wide text-[rgb(var(--muted))]">
-                  Before next review
-                </div>
-                <div className="mt-2 whitespace-pre-wrap rounded-2xl border border-[rgb(var(--border))] bg-[rgba(var(--card),0.7)] p-4 text-sm">
-                  {beforeNextReview || "—"}
-                </div>
-              </div>
-
-              <div className="mt-6">
-                <div className="text-sm font-semibold uppercase tracking-wide text-[rgb(var(--muted))]">
-                  Notes
-                </div>
-                <div className="mt-2 whitespace-pre-wrap rounded-2xl border border-[rgb(var(--border))] bg-[rgba(var(--card),0.7)] p-4 text-sm">
-                  {notes || "—"}
-                </div>
+                <SummaryTile
+                  label="Next review"
+                  value={
+                    [
+                      previewPayload.nextReviewDate,
+                      previewPayload.nextReviewMode,
+                    ]
+                      .filter(Boolean)
+                      .join(" • ") || "—"
+                  }
+                />
+                <SummaryTile
+                  label="Before next review"
+                  value={previewPayload.beforeNextReview || "—"}
+                />
+                <SummaryTile
+                  label="Notes"
+                  value={previewPayload.notes || "—"}
+                />
               </div>
             </div>
           </section>
         )}
-
-        {editorOpen && (
-          <EditorOverlay onClose={closeEditor}>
-            <div className="rounded-t-[28px] border border-[rgb(var(--border))] bg-[rgb(var(--surface))] p-5 md:rounded-[28px] md:p-6">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <h2 className="text-xl font-semibold">
-                    {editorRowId ? "Edit medication" : "Add medication"}
-                  </h2>
-                  <p className="mt-1 text-sm text-[rgb(var(--muted))]">
-                    Fill the medication details cleanly. This is the part humans
-                    love making messy.
-                  </p>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={closeEditor}
-                  className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-2 text-sm font-semibold"
-                >
-                  Close
-                </button>
-              </div>
-
-              <div className="mt-5 grid gap-4 md:grid-cols-2">
-                <Field label="Medication" required>
-                  <FieldInput
-                    mode={inputMode}
-                    value={editorDraft.medication}
-                    onChange={(v) =>
-                      setEditorDraft((prev) => ({ ...prev, medication: v }))
-                    }
-                    options={
-                      getTemplateOptions(
-                        systemById.get(
-                          sections.find((s) => s.id === editorSectionId)
-                            ?.systemId || "",
-                        ),
-                        editorTemplateIndex,
-                      ).medication_options
-                    }
-                    placeholder="Medication"
-                    inputRef={refMed}
-                  />
-                </Field>
-
-                <Field label="Dose" required>
-                  <FieldInput
-                    mode={inputMode}
-                    value={editorDraft.dose}
-                    onChange={(v) =>
-                      setEditorDraft((prev) => ({ ...prev, dose: v }))
-                    }
-                    options={
-                      getTemplateOptions(
-                        systemById.get(
-                          sections.find((s) => s.id === editorSectionId)
-                            ?.systemId || "",
-                        ),
-                        editorTemplateIndex,
-                      ).dose_options
-                    }
-                    placeholder="Dose"
-                    inputRef={refDose}
-                  />
-                </Field>
-
-                <Field label="How" required>
-                  <FieldInput
-                    mode={inputMode}
-                    value={editorDraft.how}
-                    onChange={(v) =>
-                      setEditorDraft((prev) => ({ ...prev, how: v }))
-                    }
-                    options={
-                      getTemplateOptions(
-                        systemById.get(
-                          sections.find((s) => s.id === editorSectionId)
-                            ?.systemId || "",
-                        ),
-                        editorTemplateIndex,
-                      ).how_options
-                    }
-                    placeholder="How"
-                    inputRef={refHow}
-                  />
-                </Field>
-
-                <Field label="Purpose">
-                  <FieldInput
-                    mode={inputMode}
-                    value={editorDraft.purpose}
-                    onChange={(v) =>
-                      setEditorDraft((prev) => ({ ...prev, purpose: v }))
-                    }
-                    options={
-                      getTemplateOptions(
-                        systemById.get(
-                          sections.find((s) => s.id === editorSectionId)
-                            ?.systemId || "",
-                        ),
-                        editorTemplateIndex,
-                      ).purpose_options
-                    }
-                    placeholder="Purpose"
-                    inputRef={refPurpose}
-                  />
-                </Field>
-
-                <Field label="Plan" required>
-                  <FieldInput
-                    mode={inputMode}
-                    value={editorDraft.plan}
-                    onChange={(v) =>
-                      setEditorDraft((prev) => ({ ...prev, plan: v }))
-                    }
-                    options={
-                      getTemplateOptions(
-                        systemById.get(
-                          sections.find((s) => s.id === editorSectionId)
-                            ?.systemId || "",
-                        ),
-                        editorTemplateIndex,
-                      ).plan_options
-                    }
-                    placeholder="Plan"
-                    inputRef={refPlan}
-                  />
-                </Field>
-              </div>
-
-              {customColumns.length > 0 && (
-                <div className="mt-5 grid gap-4 md:grid-cols-2">
-                  {customColumns.map((c) => (
-                    <Field key={c.id} label={c.title}>
-                      <input
-                        value={editorDraft.extra?.[c.id] ?? ""}
-                        onChange={(e) =>
-                          setEditorDraft((prev) => ({
-                            ...prev,
-                            extra: { ...prev.extra, [c.id]: e.target.value },
-                          }))
-                        }
-                        className="field"
-                        placeholder={c.title}
-                      />
-                    </Field>
-                  ))}
-                </div>
-              )}
-
-              {(() => {
-                const currentSection = sections.find(
-                  (s) => s.id === editorSectionId,
-                );
-                const currentSystemId = currentSection?.systemId ?? "";
-                const favorites = favs[currentSystemId] ?? [];
-                const recent = recents[currentSystemId] ?? [];
-
-                if (favorites.length === 0 && recent.length === 0) return null;
-
-                return (
-                  <div className="mt-5 rounded-3xl border border-[rgb(var(--border))] bg-[rgba(var(--card),0.8)] p-4">
-                    {favorites.length > 0 && (
-                      <>
-                        <div className="text-xs font-semibold uppercase tracking-wide text-[rgb(var(--muted))]">
-                          Favorites
-                        </div>
-                        <div className="mt-2 flex flex-wrap gap-2">
-                          {favorites.map((item) => (
-                            <button
-                              key={`fav-${item}`}
-                              type="button"
-                              onClick={() =>
-                                setEditorDraft((prev) => ({
-                                  ...prev,
-                                  medication: item,
-                                }))
-                              }
-                              className="rounded-full border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-1.5 text-sm"
-                            >
-                              {item}
-                            </button>
-                          ))}
-                        </div>
-                      </>
-                    )}
-
-                    {recent.length > 0 && (
-                      <>
-                        <div className="mt-4 text-xs font-semibold uppercase tracking-wide text-[rgb(var(--muted))]">
-                          Recent
-                        </div>
-                        <div className="mt-2 flex flex-wrap gap-2">
-                          {recent.map((item) => (
-                            <button
-                              key={`recent-${item}`}
-                              type="button"
-                              onClick={() =>
-                                setEditorDraft((prev) => ({
-                                  ...prev,
-                                  medication: item,
-                                }))
-                              }
-                              className="rounded-full border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-1.5 text-sm"
-                            >
-                              {item}
-                            </button>
-                          ))}
-                        </div>
-                      </>
-                    )}
-                  </div>
-                );
-              })()}
-
-              <div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-between">
-                <button
-                  type="button"
-                  onClick={() => {
-                    const section = sections.find(
-                      (s) => s.id === editorSectionId,
-                    );
-                    const systemId = section?.systemId ?? "";
-                    const med = editorDraft.medication.trim();
-                    if (systemId && med) toggleFav(systemId, med);
-                  }}
-                  className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-3 text-sm font-semibold text-[rgb(var(--text))]"
-                >
-                  Toggle favorite
-                </button>
-
-                <div className="flex flex-col-reverse gap-2 sm:flex-row">
-                  <button
-                    type="button"
-                    onClick={closeEditor}
-                    className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-3 text-sm font-semibold text-[rgb(var(--text))]"
-                  >
-                    Cancel
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={saveEditor}
-                    className="rounded-2xl bg-[rgb(var(--primary))] px-4 py-3 text-sm font-semibold text-white transition hover:opacity-90"
-                  >
-                    Save medication
-                  </button>
-                </div>
-              </div>
-            </div>
-          </EditorOverlay>
-        )}
-
-        {confirmResetOpen && (
-          <ConfirmDialog
-            title="Reset this draft?"
-            description="This clears the current report, medication sections, and saved local draft data."
-            confirmLabel="Reset"
-            cancelLabel="Cancel"
-            onCancel={() => setConfirmResetOpen(false)}
-            onConfirm={clearAll}
-          />
-        )}
-
-        {toast && (
-          <div className="fixed bottom-4 left-1/2 z-[80] w-[calc(100%-2rem)] max-w-xl -translate-x-1/2 rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-3 shadow-2xl">
-            <div className="flex items-center justify-between gap-3">
-              <div className="text-sm font-medium text-[rgb(var(--text))]">
-                {toast.message}
-              </div>
-
-              {toast.onUndo && toast.undoLabel && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    toast.onUndo?.();
-                    setToast(null);
-                  }}
-                  className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-3 py-2 text-xs font-semibold"
-                >
-                  {toast.undoLabel}
-                </button>
-              )}
-            </div>
-          </div>
-        )}
       </main>
+
+      {exportOpen && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 px-4">
+          <div className="w-full max-w-md rounded-[28px] border border-slate-200 bg-white p-6 shadow-2xl">
+            <h3 className="text-xl font-semibold text-slate-950">
+              Download report PDF
+            </h3>
+            <p className="mt-2 text-sm leading-6 text-slate-600">
+              Choose the export language. English downloads as-is. Arabic
+              translates the report text online while keeping medication names
+              and patient name untouched.
+            </p>
+            <div className="mt-5 grid gap-3">
+              <button
+                type="button"
+                onClick={() => void handleExport("en")}
+                disabled={!!exportBusy}
+                className="rounded-2xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {exportBusy === "en"
+                  ? "Preparing English PDF..."
+                  : "English PDF"}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleExport("ar")}
+                disabled={!!exportBusy}
+                className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-900 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {exportBusy === "ar" ? "Preparing Arabic PDF..." : "Arabic PDF"}
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={() => setExportOpen(false)}
+              disabled={!!exportBusy}
+              className="mt-3 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {toast && (
+        <div className="fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-full border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-800 shadow-lg">
+          {toast.message}
+        </div>
+      )}
 
       <style jsx global>{`
         .field {
           width: 100%;
-          border-radius: 1rem;
-          border: 1px solid rgb(var(--border));
-          background: rgb(var(--surface));
-          padding: 0.75rem 1rem;
+          border-radius: 18px;
+          border: 1px solid rgb(226 232 240);
+          background: white;
+          padding: 0.9rem 1rem;
           font-size: 0.95rem;
-          color: rgb(var(--text));
+          line-height: 1.5;
+          color: rgb(15 23 42);
           outline: none;
           transition:
-            border-color 160ms ease,
-            box-shadow 160ms ease,
-            background 160ms ease;
+            border-color 120ms ease,
+            box-shadow 120ms ease,
+            background 120ms ease;
+        }
+
+        .field::placeholder {
+          color: rgb(148 163 184);
         }
 
         .field:focus {
-          border-color: rgb(var(--primary));
-          box-shadow: 0 0 0 4px rgba(var(--primary), 0.12);
+          border-color: rgb(59 130 246);
+          box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.14);
         }
 
         textarea.field {
           resize: vertical;
         }
-
-        @media print {
-          .print\\:shadow-none {
-            box-shadow: none !important;
-          }
-        }
       `}</style>
     </div>
-  );
-}
-
-function rowIncomplete(row: MedicationRow) {
-  return (
-    !row.medication.trim() ||
-    !row.dose.trim() ||
-    !row.how.trim() ||
-    !row.plan.trim()
-  );
-}
-
-function getTemplateOptions(
-  system?: SystemTemplate,
-  templateIndex?: number,
-): RowTemplate {
-  const empty: RowTemplate = {
-    medication_options: [],
-    dose_options: [],
-    how_options: [],
-    purpose_options: [],
-    plan_options: [],
-  };
-
-  if (!system) return empty;
-
-  if (typeof templateIndex === "number") {
-    return system.row_templates?.[templateIndex] ?? empty;
-  }
-
-  const merged: RowTemplate = {
-    medication_options: [],
-    dose_options: [],
-    how_options: [],
-    purpose_options: [],
-    plan_options: [],
-  };
-
-  for (const t of system.row_templates ?? []) {
-    merged.medication_options.push(...(t.medication_options ?? []));
-    merged.dose_options.push(...(t.dose_options ?? []));
-    merged.how_options.push(...(t.how_options ?? []));
-    merged.purpose_options.push(...(t.purpose_options ?? []));
-    merged.plan_options.push(...(t.plan_options ?? []));
-  }
-
-  return {
-    medication_options: Array.from(new Set(merged.medication_options)),
-    dose_options: Array.from(new Set(merged.dose_options)),
-    how_options: Array.from(new Set(merged.how_options)),
-    purpose_options: Array.from(new Set(merged.purpose_options)),
-    plan_options: Array.from(new Set(merged.plan_options)),
-  };
-}
-
-function Field({
-  label,
-  required,
-  children,
-}: {
-  label: string;
-  required?: boolean;
-  children: React.ReactNode;
-}) {
-  return (
-    <div>
-      <label className="mb-2 block text-sm font-semibold text-[rgb(var(--text))]">
-        {label}
-        {required && <span className="ml-1 text-[rgb(var(--danger))]">*</span>}
-      </label>
-      {children}
-    </div>
-  );
-}
-
-function Segmented<T extends string>({
-  value,
-  onChange,
-  options,
-}: {
-  value: T;
-  onChange: (v: T) => void;
-  options: { value: T; label: string }[];
-}) {
-  return (
-    <div className="inline-flex overflow-hidden rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))]">
-      {options.map((o) => {
-        const active = o.value === value;
-        return (
-          <button
-            key={o.value}
-            type="button"
-            onClick={() => onChange(o.value)}
-            className={[
-              "px-3 py-2 text-sm font-semibold transition",
-              active
-                ? "bg-[rgb(var(--primary))] text-white"
-                : "text-[rgb(var(--muted))] hover:bg-[rgba(var(--card),0.75)]",
-            ].join(" ")}
-          >
-            {o.label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-function Toggle({
-  checked,
-  onChange,
-  label,
-}: {
-  checked: boolean;
-  onChange: (v: boolean) => void;
-  label: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={() => onChange(!checked)}
-      className={[
-        "inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm font-semibold",
-        checked
-          ? "border-[rgb(var(--primary))] bg-[rgba(var(--primary),0.08)] text-[rgb(var(--text))]"
-          : "border-[rgb(var(--border))] bg-[rgb(var(--surface))] text-[rgb(var(--muted))]",
-      ].join(" ")}
-      aria-pressed={checked}
-    >
-      <span
-        className={[
-          "relative h-4 w-7 rounded-full border transition",
-          checked
-            ? "border-[rgba(var(--primary),0.35)] bg-[rgba(var(--primary),0.20)]"
-            : "border-[rgb(var(--border))] bg-[rgba(var(--card),0.9)]",
-        ].join(" ")}
-      >
-        <span
-          className={[
-            "absolute top-1/2 h-3 w-3 -translate-y-1/2 rounded-full transition-all",
-            checked
-              ? "left-3 bg-[rgb(var(--primary))]"
-              : "left-1 bg-[rgb(var(--muted))]",
-          ].join(" ")}
-        />
-      </span>
-      {label}
-    </button>
-  );
-}
-
-function SummaryTile({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-2xl border border-[rgb(var(--border))] bg-[rgba(var(--card),0.75)] p-4">
-      <div className="text-xs font-semibold uppercase tracking-wide text-[rgb(var(--muted))]">
-        {label}
-      </div>
-      <div className="mt-2 whitespace-pre-wrap text-sm font-semibold text-[rgb(var(--text))]">
-        {value}
-      </div>
-    </div>
-  );
-}
-
-function ConfirmDialog({
-  title,
-  description,
-  confirmLabel,
-  cancelLabel,
-  onConfirm,
-  onCancel,
-}: {
-  title: string;
-  description: string;
-  confirmLabel: string;
-  cancelLabel: string;
-  onConfirm: () => void;
-  onCancel: () => void;
-}) {
-  return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/45 px-4">
-      <div className="w-full max-w-md rounded-3xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] p-5 shadow-2xl">
-        <div className="text-lg font-semibold">{title}</div>
-        <p className="mt-2 text-sm leading-6 text-[rgb(var(--muted))]">
-          {description}
-        </p>
-        <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-          <button
-            type="button"
-            onClick={onCancel}
-            className="rounded-xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-2 text-sm font-semibold"
-          >
-            {cancelLabel}
-          </button>
-          <button
-            type="button"
-            onClick={onConfirm}
-            className="rounded-xl bg-[rgb(var(--primary))] px-4 py-2 text-sm font-semibold text-white"
-          >
-            {confirmLabel}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function EditorOverlay({
-  children,
-  onClose,
-}: {
-  children: React.ReactNode;
-  onClose: () => void;
-}) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
-  return (
-    <div className="fixed inset-0 z-50">
-      <button
-        type="button"
-        className="absolute inset-0 bg-black/40"
-        onClick={onClose}
-        aria-label="Close"
-      />
-
-      <div className="absolute inset-x-0 bottom-0 md:inset-0 md:flex md:items-center md:justify-center">
-        <div className="w-full md:max-w-3xl">{children}</div>
-      </div>
-    </div>
-  );
-}
-
-function SmartSelect({
-  value,
-  onChange,
-  options,
-  placeholder,
-  disabled,
-  inputRef,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  options: string[];
-  placeholder: string;
-  disabled?: boolean;
-  inputRef?: React.RefObject<HTMLInputElement | HTMLSelectElement | null>;
-}) {
-  const [open, setOpen] = useState(false);
-  const [q, setQ] = useState(value);
-  const wrapRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => setQ(value), [value]);
-
-  useEffect(() => {
-    const onClick = (e: MouseEvent) => {
-      if (!wrapRef.current) return;
-      if (!wrapRef.current.contains(e.target as Node)) setOpen(false);
-    };
-
-    window.addEventListener("mousedown", onClick);
-    return () => window.removeEventListener("mousedown", onClick);
-  }, []);
-
-  const filtered = useMemo(() => {
-    const nq = normalize(q);
-    if (!nq) return options.slice(0, 12);
-    return options.filter((o) => normalize(o).includes(nq)).slice(0, 12);
-  }, [q, options]);
-
-  return (
-    <div className="relative" ref={wrapRef}>
-      <input
-        ref={(el) => {
-          if (inputRef) {
-            (
-              inputRef as React.MutableRefObject<
-                HTMLInputElement | HTMLSelectElement | null
-              >
-            ).current = el;
-          }
-        }}
-        className="field"
-        value={q}
-        onChange={(e) => {
-          setQ(e.target.value);
-          onChange(e.target.value);
-        }}
-        onFocus={() => setOpen(true)}
-        placeholder={placeholder}
-        disabled={disabled}
-      />
-
-      {open && filtered.length > 0 && (
-        <div className="absolute z-50 mt-2 w-full overflow-hidden rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] shadow-[0_10px_30px_rgba(2,8,23,0.12)]">
-          {filtered.map((opt) => (
-            <button
-              key={opt}
-              type="button"
-              className="w-full px-3 py-2 text-left text-sm hover:bg-[rgba(var(--primary),0.08)]"
-              onClick={() => {
-                onChange(opt);
-                setQ(opt);
-                setOpen(false);
-              }}
-            >
-              {opt}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function FieldInput({
-  mode,
-  value,
-  onChange,
-  options,
-  placeholder,
-  disabled,
-  inputRef,
-}: {
-  mode: InputMode;
-  value: string;
-  onChange: (v: string) => void;
-  options: string[];
-  placeholder: string;
-  disabled?: boolean;
-  inputRef?: React.RefObject<HTMLInputElement | HTMLSelectElement | null>;
-}) {
-  if (mode === "pick" && options.length > 0) {
-    const hasCustom =
-      value && !options.some((x) => x.toLowerCase() === value.toLowerCase());
-
-    return (
-      <select
-        ref={(el) => {
-          if (inputRef) {
-            (
-              inputRef as React.MutableRefObject<
-                HTMLInputElement | HTMLSelectElement | null
-              >
-            ).current = el;
-          }
-        }}
-        className="field"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        disabled={disabled}
-      >
-        <option value="">{placeholder}</option>
-        {hasCustom && <option value={value}>{`Custom: ${value}`}</option>}
-        {options.map((opt) => (
-          <option key={opt} value={opt}>
-            {opt}
-          </option>
-        ))}
-      </select>
-    );
-  }
-
-  if (mode === "smart" && options.length > 0) {
-    return (
-      <SmartSelect
-        value={value}
-        onChange={onChange}
-        options={options}
-        placeholder={placeholder}
-        disabled={disabled}
-        inputRef={inputRef}
-      />
-    );
-  }
-
-  return (
-    <input
-      ref={(el) => {
-        if (inputRef) {
-          (
-            inputRef as React.MutableRefObject<
-              HTMLInputElement | HTMLSelectElement | null
-            >
-          ).current = el;
-        }
-      }}
-      className="field"
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      placeholder={placeholder}
-      disabled={disabled}
-    />
   );
 }
