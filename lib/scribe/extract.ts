@@ -37,6 +37,7 @@ export type StructuredDraft = {
   nextReviewMode: "" | "In-person" | "Video";
   beforeNextReview: string;
   notes: string;
+  aiSuggestion: string;
   medications: ScribeMedication[];
   warnings: string[];
 };
@@ -207,6 +208,7 @@ function normalizeStructuredPayload(value: unknown): StructuredPayload {
     nextReviewMode: safeMode(payload.nextReviewMode),
     beforeNextReview: safeString(payload.beforeNextReview),
     notes: safeString(payload.notes),
+    aiSuggestion: safeString(payload.aiSuggestion),
     medications: Array.isArray(payload.medications)
       ? payload.medications
           .map(normalizeMedication)
@@ -309,6 +311,7 @@ function buildSchema() {
       nextReviewMode: { type: "string" },
       beforeNextReview: { type: "string" },
       notes: { type: "string" },
+      aiSuggestion: { type: "string" },
       medications: {
         type: "array",
         items: {
@@ -362,6 +365,7 @@ function buildSchema() {
       "nextReviewMode",
       "beforeNextReview",
       "notes",
+      "aiSuggestion",
       "medications",
       "warnings",
     ],
@@ -413,38 +417,67 @@ function buildPrompts(
 
   const medicationHints = process.env.GROQ_MEDICATION_HINTS?.trim() || "";
 
-  const systemPrompt = [
-    "You are a medical scribe extraction engine.",
-    "Convert a clinical transcript into structured JSON.",
-    "The transcript may contain mixed Arabic and English speech, sometimes inside the same sentence.",
-    "Never assume the whole transcript is one language.",
-    "Return JSON only.",
-    "Use the bilingual transcript as evidence, but return general note fields in English whenever reasonably possible.",
-    "When the patient's name is spoken in Arabic, transliterate it into a natural English spelling instead of leaving it in Arabic script.",
-    "Keep medication names in English when reasonably possible.",
-    "For every explicitly mentioned medication, always return both rawMedication and medication.",
-    "rawMedication must contain the medication name exactly as it appears in the transcript.",
-    "medication must contain the best normalized English medication name when you are reasonably confident.",
-    "If you are not confident about the standardized English medication name, copy rawMedication into medication exactly and do not omit the drug.",
-    "If a medication is explicitly mentioned, include it in the medications array even if dose, how, purpose, or plan are missing.",
-    "If dose, how, purpose, or plan are missing, return empty strings for those fields.",
-    "purpose must stay empty if it is not clearly supported by the transcript.",
-    "Extract occupation, supervisingDoctor, carer, allergies, intolerances, reviewCompletedBy, treatmentGoals, nextReviewDate, nextReviewMode, beforeNextReview, and notes when clearly stated.",
-    "nextReviewMode must be either In-person, Video, or an empty string.",
-    "If a date is clearly stated, prefer YYYY-MM-DD.",
-    "Do not invent facts.",
-    'Unknown strings must be "".',
-    "Unknown arrays must be [].",
-    "Only include medications and diagnoses clearly supported by the transcript.",
-    "Do not add commentary outside the JSON object.",
-  ]
-    .concat(
-      medicationHints
-        ? [`Helpful medication spellings: ${medicationHints}`]
-        : [],
-    )
-    .join(" ");
+  const systemPrompt = `
+You are a medical documentation extraction assistant.
 
+Your task is to extract structured clinical information from a dictated transcript.
+The transcript may contain Arabic, English, or mixed Arabic-English speech in the same sentence.
+
+Return ONLY valid JSON that matches the required schema exactly.
+
+Important rules:
+- Fill as many fields as possible when explicitly stated or strongly supported by the transcript.
+- If a field is not mentioned, return an empty string for text fields or an empty array for list fields.
+- Do not invent facts.
+- Do not guess unsupported diagnoses or unsupported treatments.
+- Patient name should be written in English spelling when spoken in Arabic, using best-effort transliteration.
+- Keep medication names exactly as clinically intended.
+- Preserve medically relevant wording.
+- Use concise, clean clinical English in extracted fields.
+- Do not output markdown.
+- Do not output explanations.
+- Do not output anything except valid JSON.
+
+Field extraction guidance:
+- patientName: extract full patient name and transliterate Arabic names into English spelling if needed
+- caseNumber: extract MRN, case number, or file number
+- dob: extract date of birth if explicitly stated
+- age: extract age if stated
+- sex: extract male/female if stated
+- occupation: extract occupation if stated
+- supervisingDoctor: extract supervising doctor if stated
+- carer: extract carer or representative if stated
+- allergies: extract known allergies if stated
+- intolerances: extract medication intolerances if stated
+- chiefComplaint: extract main reason for visit
+- significantHistory: extract important past medical history
+- associatedSymptoms: extract symptoms clearly associated with the complaint
+- examFindings: extract examination findings, vitals, or documented observations
+- labSummary: extract laboratory information if stated
+- imagingSummary: extract imaging information if stated
+- diagnosisHints: extract likely documented diagnoses explicitly supported by the transcript
+- reviewCompletedBy: extract if stated
+- treatmentGoals: extract if stated
+- nextReviewDate: extract if stated
+- nextReviewMode: extract if stated
+- beforeNextReview: extract follow-up steps before next review
+- notes: extract additional useful clinical notes that do not fit cleanly elsewhere
+- medications: extract each medication row separately with:
+  systemId, diagnosis, rawMedication, medication, dose, how, purpose, plan
+- warnings: include extraction uncertainty or safety warnings only when needed
+
+Medication extraction rules:
+- Split medication name from dose whenever possible
+- Preserve exact medication identity
+- Extract how-to-take instructions as completely as possible
+- Extract purpose only if stated
+- Extract agreed plan only if stated
+- If multiple medications are mentioned, return multiple medication rows
+- Do not merge distinct medications into one row
+- Do not drop a medication that is clearly stated
+
+${medicationHints ? `Medication hints:\n${medicationHints}` : ""}
+`.trim();
   const userPrompt = [
     "Schema:",
     JSON.stringify(schema),
@@ -524,18 +557,46 @@ async function callGroqExtraction(
   );
   const primaryResponseFormat = buildResponseFormat(model, schema);
 
-  let content = await requestGroqExtraction({
-    model,
-    systemPrompt,
-    userPrompt,
-    responseFormat: primaryResponseFormat,
-  });
-  let parsed = safeParseJson<StructuredPayload>(content);
+  let content = "";
+  let parsed: StructuredPayload | null = null;
+  let usedJsonObjectFallback = false;
 
-  if (!parsed && primaryResponseFormat.type !== "json_object") {
+  try {
     content = await requestGroqExtraction({
       model,
-      systemPrompt: `${systemPrompt} Return a valid JSON object only. No markdown. No prose.`,
+      systemPrompt,
+      userPrompt,
+      responseFormat: primaryResponseFormat,
+    });
+    parsed = safeParseJson<StructuredPayload>(content);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const schemaFailed = /json_validate_failed|Failed to generate JSON/i.test(
+      message,
+    );
+
+    if (!schemaFailed || primaryResponseFormat.type === "json_object") {
+      throw error;
+    }
+
+    usedJsonObjectFallback = true;
+    content = await requestGroqExtraction({
+      model,
+      systemPrompt: `${systemPrompt} Return a valid JSON object only. Include every supported key exactly once. No markdown. No prose.`,
+      userPrompt,
+      responseFormat: { type: "json_object" },
+    });
+    parsed = safeParseJson<StructuredPayload>(content);
+  }
+
+  if (
+    !parsed &&
+    !usedJsonObjectFallback &&
+    primaryResponseFormat.type !== "json_object"
+  ) {
+    content = await requestGroqExtraction({
+      model,
+      systemPrompt: `${systemPrompt} Return a valid JSON object only. Include every supported key exactly once. No markdown. No prose.`,
       userPrompt,
       responseFormat: { type: "json_object" },
     });
@@ -582,6 +643,7 @@ export async function extractStructuredDraft(
       nextReviewMode: "",
       beforeNextReview: "",
       notes: "",
+      aiSuggestion: "",
       medications: [],
       warnings: ["No transcript detected."],
     };
@@ -618,6 +680,7 @@ export async function extractStructuredDraft(
     nextReviewMode: structured.nextReviewMode,
     beforeNextReview: structured.beforeNextReview,
     notes: structured.notes,
+    aiSuggestion: structured.aiSuggestion,
     medications,
     warnings: dedupeStrings(structured.warnings),
   };

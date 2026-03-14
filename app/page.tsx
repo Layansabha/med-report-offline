@@ -594,6 +594,7 @@ export default function Page() {
   >("");
   const [beforeNextReview, setBeforeNextReview] = useState("");
   const [notes, setNotes] = useState("");
+  const [aiSuggestion, setAiSuggestion] = useState("");
 
   const [sections, setSections] = useState<MedicationSection[]>([]);
   const [addSystemId, setAddSystemId] = useState("");
@@ -667,6 +668,7 @@ export default function Page() {
       );
       setBeforeNextReview(String(parsed.beforeNextReview ?? ""));
       setNotes(String(parsed.notes ?? ""));
+      setAiSuggestion(String(parsed.aiSuggestion ?? ""));
       setAddSystemId(String(parsed.addSystemId ?? ""));
       setSearch(String(parsed.search ?? ""));
       setIncompleteOnly(Boolean(parsed.incompleteOnly));
@@ -722,6 +724,7 @@ export default function Page() {
       nextReviewMode,
       beforeNextReview,
       notes,
+      aiSuggestion,
       addSystemId,
       search,
       incompleteOnly,
@@ -755,6 +758,7 @@ export default function Page() {
     nextReviewMode,
     beforeNextReview,
     notes,
+    aiSuggestion,
     addSystemId,
     search,
     incompleteOnly,
@@ -1050,6 +1054,7 @@ export default function Page() {
     appendIfEmpty(setTreatmentGoals, draft.treatmentGoals);
     appendIfEmpty(setBeforeNextReview, draft.beforeNextReview);
     appendIfEmpty(setNotes, draft.notes);
+    appendIfEmpty(setAiSuggestion, draft.aiSuggestion);
 
     const nextDob = toInputDate(draft.dob || "");
     if (nextDob) {
@@ -1069,6 +1074,26 @@ export default function Page() {
     }
 
     appendText(setSignificantHistory, draft.significantHistory);
+
+    const structuredNotes = [
+      draft.chiefComplaint?.trim()
+        ? `Chief complaint: ${draft.chiefComplaint.trim()}`
+        : "",
+      Array.isArray(draft.associatedSymptoms) && draft.associatedSymptoms.length
+        ? `Associated symptoms: ${draft.associatedSymptoms.join(", ")}`
+        : "",
+      draft.examFindings?.trim()
+        ? `Exam findings: ${draft.examFindings.trim()}`
+        : "",
+      draft.labSummary?.trim() ? `Lab summary: ${draft.labSummary.trim()}` : "",
+      draft.imagingSummary?.trim()
+        ? `Imaging summary: ${draft.imagingSummary.trim()}`
+        : "",
+    ].filter(Boolean);
+
+    if (structuredNotes.length) {
+      appendText(setNotes, structuredNotes.join(""));
+    }
 
     mergeTranscriptSuggestions(draft);
 
@@ -1149,6 +1174,11 @@ export default function Page() {
       draft.intolerances,
       draft.reviewCompletedBy,
       draft.notes,
+      draft.aiSuggestion,
+      draft.chiefComplaint,
+      draft.examFindings,
+      draft.labSummary,
+      draft.imagingSummary,
     ].filter((value) => value?.trim()).length;
 
     showToast(
@@ -1179,6 +1209,7 @@ export default function Page() {
     setNextReviewMode("");
     setBeforeNextReview("");
     setNotes("");
+    setAiSuggestion("");
     setSections([]);
     setAddSystemId("");
     setSearch("");
@@ -1963,6 +1994,13 @@ export default function Page() {
                   </p>
                 </div>
 
+                <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+                  <div className="font-semibold">Internal AI suggestion</div>
+                  <div className="mt-1 whitespace-pre-wrap text-amber-800">
+                    {aiSuggestion || "No AI suggestion yet."}
+                  </div>
+                </div>
+
                 <div className="grid gap-4 md:grid-cols-2">
                   <Field label="Review date">
                     <input
@@ -2028,6 +2066,17 @@ export default function Page() {
                       onChange={(e) => setNotes(e.target.value)}
                       className="field min-h-[140px]"
                       placeholder="Printable notes"
+                    />
+                  </Field>
+                  <Field
+                    label="AI suggestion"
+                    hint="Internal clinician-only suggestion. This does not appear in the printed patient report."
+                  >
+                    <textarea
+                      value={aiSuggestion}
+                      onChange={(e) => setAiSuggestion(e.target.value)}
+                      className="field min-h-[160px]"
+                      placeholder="AI impression and treatment suggestion"
                     />
                   </Field>
                 </div>
