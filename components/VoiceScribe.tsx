@@ -1,18 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-
-export type ConfidenceLevel = "" | "low" | "medium" | "high";
-
-export type AiClinicalSupport = {
-  summary: string;
-  likelyDiagnosis: string;
-  reasoning: string;
-  medicationOptions: string[];
-  nextSteps: string[];
-  redFlags: string[];
-  confidence: ConfidenceLevel;
-};
+import { useMemo, useRef, useState } from "react";
 
 export type ScribeMedication = {
   systemId: string;
@@ -23,6 +11,16 @@ export type ScribeMedication = {
   how: string;
   purpose: string;
   plan: string;
+};
+
+export type AiClinicalSupport = {
+  summary: string;
+  likelyDiagnosis: string;
+  reasoning: string;
+  currentTreatment: string;
+  nextSteps: string[];
+  redFlags: string[];
+  confidence: "low" | "medium" | "high";
 };
 
 export type ScribeDraft = {
@@ -47,120 +45,85 @@ export type ScribeDraft = {
   reviewCompletedBy: string;
   treatmentGoals: string;
   nextReviewDate: string;
-  nextReviewMode: "" | "In-person" | "Video";
+  nextReviewMode: string;
   beforeNextReview: string;
   notes: string;
-  aiSuggestion: string;
-  aiClinicalSupport: AiClinicalSupport;
   medications: ScribeMedication[];
   warnings: string[];
-  timings?: {
-    totalMs?: number;
-    byStep?: Record<string, number>;
-    steps?: Array<{ step: string; ms: number }>;
-  };
+  aiClinicalSupport: AiClinicalSupport;
 };
 
-type TranscribeResult = {
+type Props = {
+  onApplyDraft: (draft: ScribeDraft) => void;
+};
+
+type TranscribeResponse = {
   text?: string;
   mixedText?: string;
   language?: string;
   languageHint?: string;
-  duration?: number | null;
-  model?: string;
   error?: string;
 };
 
-type VoiceScribeProps = {
-  onApplyDraft: (draft: ScribeDraft) => void;
+type ScribeResponse = ScribeDraft & {
+  error?: string;
 };
-
-function compactText(value: string) {
-  return (value || "").replace(/\s+/g, " ").trim();
-}
-
-function formatMs(value?: number) {
-  if (typeof value !== "number" || Number.isNaN(value)) return "—";
-  if (value < 1000) return `${Math.round(value)} ms`;
-  return `${(value / 1000).toFixed(2)} s`;
-}
 
 function readErrorMessage(error: unknown) {
   if (error instanceof Error) return error.message;
-  return "Unexpected request failure.";
+  return String(error || "Unexpected error.");
 }
 
-export default function VoiceScribe({ onApplyDraft }: VoiceScribeProps) {
+async function parseJsonResponse<T>(res: Response): Promise<T> {
+  const text = await res.text();
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(text || "Invalid server response.");
+  }
+}
+
+export default function VoiceScribe({ onApplyDraft }: Props) {
   const [transcript, setTranscript] = useState("");
   const [draft, setDraft] = useState<ScribeDraft | null>(null);
-  const [languageHint, setLanguageHint] = useState("");
-  const [duration, setDuration] = useState<number | null>(null);
-  const [transcribeModel, setTranscribeModel] = useState("");
-  const [isRecording, setIsRecording] = useState(false);
+  const [status, setStatus] = useState(
+    "Ready for dictation or pasted transcript.",
+  );
+  const [error, setError] = useState<string | null>(null);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [isExtracting, setIsExtracting] = useState(false);
-  const [audioFileName, setAudioFileName] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [status, setStatus] = useState(
-    "Record audio, upload a file, or paste a transcript, then extract the structured draft.",
-  );
-
+  const [isRecording, setIsRecording] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  useEffect(() => {
-    return () => {
-      streamRef.current?.getTracks().forEach((track) => track.stop());
-      mediaRecorderRef.current?.stop?.();
-    };
-  }, []);
-
-  const metrics = useMemo(() => {
-    const words = transcript
-      ? transcript.split(/\s+/).filter(Boolean).length
-      : 0;
-    return {
-      words,
-      meds: draft?.medications.length || 0,
-      warnings: draft?.warnings.length || 0,
-    };
-  }, [draft, transcript]);
+  const warnings = useMemo(() => draft?.warnings ?? [], [draft]);
 
   async function transcribeBlob(blob: Blob, fileName: string) {
     setError(null);
-    setIsTranscribing(true);
     setStatus("Transcribing audio...");
-    setAudioFileName(fileName);
+    setIsTranscribing(true);
 
     try {
-      const formData = new FormData();
-      formData.append("file", blob, fileName || `dictation-${Date.now()}.webm`);
+      const form = new FormData();
+      form.append("file", blob, fileName);
 
       const res = await fetch("/api/transcribe", {
         method: "POST",
-        body: formData,
+        body: form,
       });
-
-      const payload = (await res.json()) as TranscribeResult;
-      if (!res.ok) {
-        throw new Error(payload.error || "Transcription failed.");
+      const payload = await parseJsonResponse<TranscribeResponse>(res);
+      if (!res.ok || payload.error) {
+        throw new Error(payload.error || "Audio transcription failed.");
       }
 
-      const nextTranscript = compactText(
-        payload.mixedText || payload.text || "",
-      );
+      const nextTranscript = (payload.mixedText || payload.text || "").trim();
       setTranscript(nextTranscript);
-      setLanguageHint(
-        compactText(payload.languageHint || payload.language || ""),
-      );
-      setDuration(
-        typeof payload.duration === "number" ? payload.duration : null,
-      );
-      setTranscribeModel(compactText(payload.model || ""));
       setStatus(
-        "Transcript ready. Extract the structured draft when you are ready.",
+        payload.languageHint
+          ? `Transcript ready (${payload.languageHint}). Review it, then run extraction.`
+          : "Transcript ready. Review it, then run extraction.",
       );
     } catch (err) {
       setError(readErrorMessage(err));
@@ -172,7 +135,6 @@ export default function VoiceScribe({ onApplyDraft }: VoiceScribeProps) {
 
   async function startRecording() {
     setError(null);
-
     if (!navigator.mediaDevices?.getUserMedia) {
       setError("This browser does not support audio recording.");
       return;
@@ -205,56 +167,43 @@ export default function VoiceScribe({ onApplyDraft }: VoiceScribeProps) {
 
       recorder.start();
       setIsRecording(true);
-      setStatus("Recording... stop when the dictation is done.");
+      setStatus("Recording... press stop when finished.");
     } catch (err) {
       setError(readErrorMessage(err));
-      setStatus("Could not start recording.");
+      setStatus("Microphone access failed.");
     }
   }
 
   function stopRecording() {
-    if (!mediaRecorderRef.current) return;
+    mediaRecorderRef.current?.stop();
     setIsRecording(false);
-    setStatus("Stopping recording and preparing upload...");
-    mediaRecorderRef.current.stop();
-  }
-
-  async function handleFileSelect(file: File | null) {
-    if (!file) return;
-    await transcribeBlob(file, file.name);
+    setStatus("Processing recording...");
   }
 
   async function extractDraft() {
-    const cleanedTranscript = compactText(transcript);
-    if (!cleanedTranscript) {
-      setError("Add or generate a transcript first.");
+    const cleanTranscript = transcript.trim();
+    setError(null);
+    if (!cleanTranscript) {
+      setError("Add or transcribe a transcript first.");
       return;
     }
 
-    setError(null);
     setIsExtracting(true);
-    setStatus("Extracting structured medical draft and AI clinical support...");
+    setStatus("Extracting structured draft...");
 
     try {
       const res = await fetch("/api/scribe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ transcript: cleanedTranscript }),
+        body: JSON.stringify({ transcript: cleanTranscript }),
       });
-
-      const payload = (await res.json()) as ScribeDraft & { error?: string };
-      if (!res.ok) {
+      const payload = await parseJsonResponse<ScribeResponse>(res);
+      if (!res.ok || payload.error) {
         throw new Error(payload.error || "Structured extraction failed.");
       }
-
-      const nextDraft = {
-        ...payload,
-        transcript: cleanedTranscript,
-      };
-
-      setDraft(nextDraft);
+      setDraft(payload);
       setStatus(
-        "Structured draft ready. Review it, then apply it to the form.",
+        "Structured draft ready. Apply it to the form when it looks right.",
       );
     } catch (err) {
       setError(readErrorMessage(err));
@@ -265,239 +214,159 @@ export default function VoiceScribe({ onApplyDraft }: VoiceScribeProps) {
   }
 
   return (
-    <section className="glass-card print-card overflow-hidden">
-      <div className="border-b border-[rgb(var(--border))] bg-[linear-gradient(135deg,rgba(var(--primary),0.08),rgba(var(--primary),0.02))] px-5 py-5 sm:px-6">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <div className="kicker">Voice intake</div>
-            <h2 className="mt-2 text-xl font-bold text-[rgb(var(--text))]">
-              Dictation, transcript cleanup, and AI extraction
-            </h2>
-            <p className="mt-2 max-w-3xl text-sm leading-6 text-[rgb(var(--muted))]">
-              The transcript can stay mixed Arabic and English. The AI then
-              extracts as many structured fields as it can, plus an internal
-              clinical support note that stays out of the printable report.
-            </p>
-          </div>
-
-          <div className="grid grid-cols-3 gap-3 sm:min-w-[360px]">
-            <div className="metric-card">
-              <div className="metric-label">Transcript words</div>
-              <div className="metric-value">{metrics.words}</div>
-            </div>
-            <div className="metric-card">
-              <div className="metric-label">Med rows</div>
-              <div className="metric-value">{metrics.meds}</div>
-            </div>
-            <div className="metric-card">
-              <div className="metric-label">Warnings</div>
-              <div className="metric-value">{metrics.warnings}</div>
-            </div>
-          </div>
+    <section className="panel panel-lg">
+      <div className="section-head">
+        <div>
+          <p className="eyebrow">Voice intake</p>
+          <h2>Transcript and AI extraction</h2>
+          <p className="muted">
+            Record mixed Arabic and English dictation, or paste a transcript
+            directly.
+          </p>
+        </div>
+        <div className="toolbar-row">
+          {!isRecording ? (
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={startRecording}
+              disabled={isTranscribing || isExtracting}
+            >
+              Start recording
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="btn btn-danger"
+              onClick={stopRecording}
+            >
+              Stop recording
+            </button>
+          )}
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={isTranscribing || isExtracting}
+          >
+            Upload audio
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={extractDraft}
+            disabled={isTranscribing || isExtracting || !transcript.trim()}
+          >
+            {isExtracting ? "Extracting..." : "Run extraction"}
+          </button>
         </div>
       </div>
 
-      <div className="space-y-6 p-5 sm:p-6">
-        <div className="grid gap-4 xl:grid-cols-[1.25fr_0.9fr]">
-          <div className="section-card space-y-4">
-            <div className="flex flex-wrap items-center gap-3">
-              {!isRecording ? (
-                <button
-                  type="button"
-                  className="btn-primary"
-                  onClick={startRecording}
-                  disabled={isTranscribing || isExtracting}
-                >
-                  Start recording
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  className="btn-danger"
-                  onClick={stopRecording}
-                >
-                  Stop recording
-                </button>
-              )}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="audio/*"
+        hidden
+        onChange={async (event) => {
+          const file = event.target.files?.[0];
+          if (!file) return;
+          await transcribeBlob(file, file.name);
+          event.currentTarget.value = "";
+        }}
+      />
 
-              <button
-                type="button"
-                className="btn-secondary"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={isRecording || isTranscribing}
-              >
-                Upload audio
-              </button>
+      <label className="field-block">
+        <span className="field-label">Transcript</span>
+        <textarea
+          className="textarea transcript-area"
+          value={transcript}
+          onChange={(event) => setTranscript(event.target.value)}
+          placeholder="Paste or transcribe the clinical dictation here."
+          rows={7}
+        />
+        <span className="field-hint">
+          Edit the transcript if ASR missed wording, then run extraction again.
+        </span>
+      </label>
 
-              <button
-                type="button"
-                className="btn-secondary"
-                onClick={extractDraft}
-                disabled={
-                  isTranscribing || isExtracting || !compactText(transcript)
-                }
-              >
-                {isExtracting ? "Extracting..." : "Extract structured draft"}
-              </button>
+      <div className="status-row">
+        <p className="muted">{status}</p>
+        {error ? <p className="error-text">{error}</p> : null}
+      </div>
 
-              <input
-                ref={fileInputRef}
-                className="hidden"
-                type="file"
-                accept="audio/*,.m4a,.mp3,.wav,.webm"
-                onChange={(event) =>
-                  handleFileSelect(event.target.files?.[0] || null)
-                }
-              />
-            </div>
+      {warnings.length ? (
+        <div className="notice warning">
+          <strong>Extraction warnings</strong>
+          <ul>
+            {warnings.map((warning) => (
+              <li key={warning}>{warning}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              <div className="chip">Status: {status}</div>
-              <div className="chip">Language hint: {languageHint || "—"}</div>
-              <div className="chip">
-                Duration: {duration ? `${duration.toFixed(1)} s` : "—"}
-              </div>
-              <div className="chip">
-                Source:{" "}
-                {audioFileName || transcribeModel || "Manual transcript"}
-              </div>
-            </div>
-
-            <div>
-              <label className="field-label">Transcript</label>
-              <textarea
-                className="field-textarea min-h-[260px]"
-                value={transcript}
-                onChange={(event) => setTranscript(event.target.value)}
-                placeholder="Paste or record the bilingual transcript here."
-              />
-              <div className="field-hint">
-                Edit the transcript if the ASR missed wording, then run
-                extraction again.
-              </div>
-            </div>
-
-            {error ? (
-              <div className="rounded-2xl border border-[rgba(var(--danger),0.2)] bg-[rgba(var(--danger),0.06)] px-4 py-3 text-sm text-[rgb(var(--danger))]">
-                {error}
-              </div>
-            ) : null}
+      {draft ? (
+        <div className="snapshot-grid">
+          <div className="snapshot-card">
+            <p className="eyebrow">Patient</p>
+            <h3>{draft.patientName || "—"}</h3>
+            <p className="muted">
+              {draft.caseNumber ? `MRN ${draft.caseNumber}` : "MRN —"}
+              {draft.age ? ` • ${draft.age}` : ""}
+              {draft.sex ? ` • ${draft.sex}` : ""}
+            </p>
           </div>
-
-          <div className="section-card space-y-4">
-            <div className="flex items-center justify-between gap-3">
+          <div className="snapshot-card">
+            <p className="eyebrow">Likely diagnosis</p>
+            <h3>
+              {draft.aiClinicalSupport.likelyDiagnosis ||
+                draft.diagnosisHints[0] ||
+                "—"}
+            </h3>
+            <p className="muted">
+              Confidence: {draft.aiClinicalSupport.confidence || "low"}
+            </p>
+          </div>
+          <div className="snapshot-card snapshot-card-wide">
+            <div className="row-between">
               <div>
-                <div className="field-label mb-0">
-                  Structured draft snapshot
-                </div>
-                <div className="field-hint mt-1">
-                  Quick read before applying it to the main form.
-                </div>
+                <p className="eyebrow">Internal AI clinical support</p>
+                <p className="muted">
+                  Visible inside the app only. It will not print in the PDF.
+                </p>
               </div>
               <button
                 type="button"
-                className="btn-primary"
-                onClick={() => draft && onApplyDraft(draft)}
-                disabled={!draft}
+                className="btn btn-primary"
+                onClick={() => onApplyDraft(draft)}
               >
                 Apply to form
               </button>
             </div>
-
-            {draft ? (
-              <div className="space-y-4">
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <div className="metric-card">
-                    <div className="metric-label">Patient</div>
-                    <div className="mt-1 text-base font-semibold">
-                      {draft.patientName || "—"}
-                    </div>
-                    <div className="mt-1 text-xs text-[rgb(var(--muted))]">
-                      MRN {draft.caseNumber || "—"} • {draft.sex || "—"} •{" "}
-                      {draft.age || "—"}
-                    </div>
-                  </div>
-                  <div className="metric-card">
-                    <div className="metric-label">Likely diagnosis</div>
-                    <div className="mt-1 text-base font-semibold">
-                      {draft.aiClinicalSupport?.likelyDiagnosis ||
-                        draft.diagnosisHints[0] ||
-                        "—"}
-                    </div>
-                    <div className="mt-1 text-xs text-[rgb(var(--muted))]">
-                      Confidence: {draft.aiClinicalSupport?.confidence || "—"}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--card))] p-4">
-                  <div className="text-sm font-semibold">
-                    Internal AI clinical support
-                  </div>
-                  <p className="mt-2 text-sm leading-6 text-[rgb(var(--muted))]">
-                    {draft.aiClinicalSupport?.summary ||
-                      draft.aiSuggestion ||
-                      "No AI clinical support generated."}
-                  </p>
-                </div>
-
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <div className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--card))] p-4">
-                    <div className="text-sm font-semibold">
-                      Documented medications
-                    </div>
-                    <ul className="mt-2 space-y-2 text-sm text-[rgb(var(--muted))]">
-                      {draft.medications.length ? (
-                        draft.medications.map((item, index) => (
-                          <li key={`${item.medication}-${index}`}>
-                            {item.medication ||
-                              item.rawMedication ||
-                              "Unnamed medication"}
-                            {item.dose ? ` • ${item.dose}` : ""}
-                            {item.how ? ` • ${item.how}` : ""}
-                          </li>
-                        ))
-                      ) : (
-                        <li>—</li>
-                      )}
-                    </ul>
-                  </div>
-
-                  <div className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--card))] p-4">
-                    <div className="text-sm font-semibold">Server timings</div>
-                    <ul className="mt-2 space-y-2 text-sm text-[rgb(var(--muted))]">
-                      {draft.timings?.steps?.length ? (
-                        draft.timings.steps.map((step) => (
-                          <li key={step.step}>
-                            {step.step}: {formatMs(step.ms)}
-                          </li>
-                        ))
-                      ) : (
-                        <li>Total: {formatMs(draft.timings?.totalMs)}</li>
-                      )}
-                    </ul>
-                  </div>
-                </div>
-
-                {draft.warnings.length ? (
-                  <div className="rounded-2xl border border-[rgba(var(--warning),0.25)] bg-[rgba(var(--warning),0.08)] p-4 text-sm text-[rgb(var(--text))]">
-                    <div className="font-semibold">Warnings</div>
-                    <ul className="mt-2 list-disc space-y-1 pl-5 text-[rgb(var(--muted))]">
-                      {draft.warnings.map((warning) => (
-                        <li key={warning}>{warning}</li>
-                      ))}
-                    </ul>
-                  </div>
-                ) : null}
+            <p>
+              {draft.aiClinicalSupport.summary ||
+                "No internal support generated."}
+            </p>
+            {draft.medications.length ? (
+              <div className="pill-list">
+                {draft.medications.map((medication, index) => {
+                  const text = [
+                    medication.medication || medication.rawMedication,
+                    medication.dose,
+                  ]
+                    .filter(Boolean)
+                    .join(" ");
+                  return (
+                    <span key={`${text}-${index}`} className="pill">
+                      {text}
+                    </span>
+                  );
+                })}
               </div>
-            ) : (
-              <div className="rounded-2xl border border-dashed border-[rgb(var(--border))] bg-[rgb(var(--surface-alt))] p-6 text-sm text-[rgb(var(--muted))]">
-                No draft yet. Humans call this the waiting room.
-              </div>
-            )}
+            ) : null}
           </div>
         </div>
-      </div>
+      ) : null}
     </section>
   );
 }

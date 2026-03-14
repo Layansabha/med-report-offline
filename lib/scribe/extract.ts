@@ -12,16 +12,14 @@ export type ScribeMedication = {
   plan: string;
 };
 
-export type ConfidenceLevel = "" | "low" | "medium" | "high";
-
 export type AiClinicalSupport = {
   summary: string;
   likelyDiagnosis: string;
   reasoning: string;
-  medicationOptions: string[];
+  currentTreatment: string;
   nextSteps: string[];
   redFlags: string[];
-  confidence: ConfidenceLevel;
+  confidence: "low" | "medium" | "high";
 };
 
 export type StructuredDraft = {
@@ -46,24 +44,23 @@ export type StructuredDraft = {
   reviewCompletedBy: string;
   treatmentGoals: string;
   nextReviewDate: string;
-  nextReviewMode: "" | "In-person" | "Video";
+  nextReviewMode: string;
   beforeNextReview: string;
   notes: string;
-  aiSuggestion: string;
-  aiClinicalSupport: AiClinicalSupport;
   medications: ScribeMedication[];
   warnings: string[];
+  aiClinicalSupport: AiClinicalSupport;
 };
 
 type StructuredPayload = Omit<
   StructuredDraft,
-  "transcript" | "aiSuggestion" | "aiClinicalSupport"
+  "transcript" | "aiClinicalSupport"
 >;
 
 type SystemCatalogEntry = {
   id: string;
   name: string;
-  diagnoses: string[];
+  diagnoses?: string[];
 };
 
 type GroqChatCompletionResponse = {
@@ -80,22 +77,13 @@ type GroqChatCompletionResponse = {
 const GROQ_BASE_URL =
   process.env.GROQ_BASE_URL || "https://api.groq.com/openai/v1";
 const DEFAULT_TEXT_MODEL = process.env.GROQ_TEXT_MODEL || "openai/gpt-oss-20b";
+const DEFAULT_EXTRACTION_MODEL =
+  process.env.GROQ_EXTRACTION_MODEL || DEFAULT_TEXT_MODEL;
+const DEFAULT_SUPPORT_MODEL =
+  process.env.GROQ_SUPPORT_MODEL || DEFAULT_TEXT_MODEL;
 
-const STRICT_SCHEMA_MODELS = new Set([
-  "openai/gpt-oss-20b",
-  "openai/gpt-oss-120b",
-]);
-
-const BEST_EFFORT_SCHEMA_MODELS = new Set([
-  "openai/gpt-oss-20b",
-  "openai/gpt-oss-120b",
-  "moonshotai/kimi-k2-instruct-0905",
-  "meta-llama/llama-4-scout-17b-16e-instruct",
-  "meta-llama/llama-4-maverick-17b-128e-instruct",
-]);
-
-function compactText(input: string) {
-  return (input || "").replace(/\s+/g, " ").trim();
+function compactText(value: string) {
+  return (value || "").replace(/\s+/g, " ").trim();
 }
 
 function safeString(value: unknown) {
@@ -105,7 +93,6 @@ function safeString(value: unknown) {
 function dedupeStrings(values: string[]) {
   const seen = new Set<string>();
   const out: string[] = [];
-
   for (const raw of values) {
     const value = compactText(raw);
     if (!value) continue;
@@ -114,37 +101,11 @@ function dedupeStrings(values: string[]) {
     seen.add(key);
     out.push(value);
   }
-
   return out;
 }
 
-function normalizeDate(value: unknown) {
-  const text = safeString(value);
-  if (!text) return "";
-  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
-  if (/^\d{4}\/\d{2}\/\d{2}$/.test(text)) return text.replaceAll("/", "-");
-
-  const match = text.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})$/);
-  if (!match) return text;
-
-  const [, dd, mm, yyyy] = match;
-  return `${yyyy}-${mm.padStart(2, "0")}-${dd.padStart(2, "0")}`;
-}
-
-function safeMode(value: unknown): "" | "In-person" | "Video" {
-  const mode = safeString(value).toLowerCase();
-  if (!mode) return "";
-  if (["in person", "in-person", "clinic", "face to face"].includes(mode)) {
-    return "In-person";
-  }
-  if (["video", "virtual", "telemedicine", "telehealth"].includes(mode)) {
-    return "Video";
-  }
-  return "";
-}
-
 function cleanJsonText(text: string) {
-  return (text || "")
+  return text
     .trim()
     .replace(/^```json\s*/i, "")
     .replace(/^```\s*/i, "")
@@ -152,15 +113,13 @@ function cleanJsonText(text: string) {
     .trim();
 }
 
-function extractJsonObject(text: string) {
+function extractJsonBlock(text: string) {
   const cleaned = cleanJsonText(text);
-  const first = cleaned.indexOf("{");
-  const last = cleaned.lastIndexOf("}");
-
-  if (first !== -1 && last !== -1 && last > first) {
-    return cleaned.slice(first, last + 1);
+  const firstObject = cleaned.indexOf("{");
+  const lastObject = cleaned.lastIndexOf("}");
+  if (firstObject !== -1 && lastObject !== -1 && lastObject > firstObject) {
+    return cleaned.slice(firstObject, lastObject + 1);
   }
-
   return cleaned;
 }
 
@@ -169,34 +128,49 @@ function safeParseJson<T>(text: string): T | null {
     return JSON.parse(cleanJsonText(text)) as T;
   } catch {
     try {
-      return JSON.parse(extractJsonObject(text)) as T;
+      return JSON.parse(extractJsonBlock(text)) as T;
     } catch {
       return null;
     }
   }
 }
 
-function normalizeForMatch(input: string) {
-  return safeString(input).toLowerCase();
+function normalizeMedication(value: unknown): ScribeMedication {
+  const item = (value ?? {}) as Record<string, unknown>;
+  return {
+    systemId: safeString(item.systemId),
+    diagnosis: safeString(item.diagnosis),
+    rawMedication: safeString(item.rawMedication),
+    medication: safeString(item.medication),
+    dose: safeString(item.dose),
+    how: safeString(item.how),
+    purpose: safeString(item.purpose),
+    plan: safeString(item.plan),
+  };
 }
 
-function normalizeMedication(value: unknown): ScribeMedication {
-  const medication = (value ?? {}) as Record<string, unknown>;
-  const rawMedication = safeString(
-    medication.rawMedication || medication.medication,
-  );
-  const normalizedMedication =
-    safeString(medication.medication) || rawMedication;
+function normalizeAiClinicalSupport(value: unknown): AiClinicalSupport {
+  const item = (value ?? {}) as Record<string, unknown>;
+  const confidenceRaw = safeString(item.confidence).toLowerCase();
+  const confidence: AiClinicalSupport["confidence"] =
+    confidenceRaw === "high"
+      ? "high"
+      : confidenceRaw === "medium"
+        ? "medium"
+        : "low";
 
   return {
-    systemId: safeString(medication.systemId),
-    diagnosis: safeString(medication.diagnosis),
-    rawMedication,
-    medication: normalizedMedication,
-    dose: safeString(medication.dose),
-    how: safeString(medication.how),
-    purpose: safeString(medication.purpose),
-    plan: safeString(medication.plan),
+    summary: safeString(item.summary),
+    likelyDiagnosis: safeString(item.likelyDiagnosis),
+    reasoning: safeString(item.reasoning),
+    currentTreatment: safeString(item.currentTreatment),
+    nextSteps: Array.isArray(item.nextSteps)
+      ? dedupeStrings(item.nextSteps.map((entry) => safeString(entry)))
+      : [],
+    redFlags: Array.isArray(item.redFlags)
+      ? dedupeStrings(item.redFlags.map((entry) => safeString(entry)))
+      : [],
+    confidence,
   };
 }
 
@@ -206,7 +180,7 @@ function normalizeStructuredPayload(value: unknown): StructuredPayload {
   return {
     patientName: safeString(payload.patientName),
     caseNumber: safeString(payload.caseNumber),
-    dob: normalizeDate(payload.dob),
+    dob: safeString(payload.dob),
     age: safeString(payload.age),
     sex: safeString(payload.sex),
     occupation: safeString(payload.occupation),
@@ -218,111 +192,44 @@ function normalizeStructuredPayload(value: unknown): StructuredPayload {
     significantHistory: safeString(payload.significantHistory),
     associatedSymptoms: Array.isArray(payload.associatedSymptoms)
       ? dedupeStrings(
-          payload.associatedSymptoms.map((item) => safeString(item)),
+          payload.associatedSymptoms.map((entry) => safeString(entry)),
         )
       : [],
     examFindings: safeString(payload.examFindings),
     labSummary: safeString(payload.labSummary),
     imagingSummary: safeString(payload.imagingSummary),
     diagnosisHints: Array.isArray(payload.diagnosisHints)
-      ? dedupeStrings(payload.diagnosisHints.map((item) => safeString(item)))
+      ? dedupeStrings(payload.diagnosisHints.map((entry) => safeString(entry)))
       : [],
     reviewCompletedBy: safeString(payload.reviewCompletedBy),
     treatmentGoals: safeString(payload.treatmentGoals),
-    nextReviewDate: normalizeDate(payload.nextReviewDate),
-    nextReviewMode: safeMode(payload.nextReviewMode),
+    nextReviewDate: safeString(payload.nextReviewDate),
+    nextReviewMode: safeString(payload.nextReviewMode),
     beforeNextReview: safeString(payload.beforeNextReview),
     notes: safeString(payload.notes),
     medications: Array.isArray(payload.medications)
       ? payload.medications
           .map(normalizeMedication)
-          .filter((item) => item.rawMedication || item.medication)
+          .filter((item) => item.medication || item.rawMedication)
       : [],
     warnings: Array.isArray(payload.warnings)
-      ? dedupeStrings(payload.warnings.map((item) => safeString(item)))
+      ? dedupeStrings(payload.warnings.map((entry) => safeString(entry)))
       : [],
   };
 }
 
-function normalizeClinicalSupport(value: unknown): AiClinicalSupport {
-  const payload = (value ?? {}) as Record<string, unknown>;
-  const confidence = safeString(payload.confidence).toLowerCase();
-
-  return {
-    summary: safeString(payload.summary),
-    likelyDiagnosis: safeString(payload.likelyDiagnosis),
-    reasoning: safeString(payload.reasoning),
-    medicationOptions: Array.isArray(payload.medicationOptions)
-      ? dedupeStrings(payload.medicationOptions.map((item) => safeString(item)))
-      : [],
-    nextSteps: Array.isArray(payload.nextSteps)
-      ? dedupeStrings(payload.nextSteps.map((item) => safeString(item)))
-      : [],
-    redFlags: Array.isArray(payload.redFlags)
-      ? dedupeStrings(payload.redFlags.map((item) => safeString(item)))
-      : [],
-    confidence:
-      confidence === "high" || confidence === "medium" || confidence === "low"
-        ? (confidence as ConfidenceLevel)
-        : "",
-  };
-}
-
-async function loadSystemCatalog(): Promise<SystemCatalogEntry[]> {
+async function loadSystems() {
+  const systemsPath = path.join(process.cwd(), "public", "systems.json");
   try {
-    const systemsPath = path.join(process.cwd(), "public", "systems.json");
-    const raw = await fs.readFile(systemsPath, "utf8");
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return [];
-
-    return parsed
-      .map((item) => {
-        const record = (item ?? {}) as Record<string, unknown>;
-        return {
-          id: safeString(record.id),
-          name: safeString(record.name),
-          diagnoses: Array.isArray(record.diagnoses)
-            ? dedupeStrings(record.diagnoses.map((entry) => safeString(entry)))
-            : [],
-        } satisfies SystemCatalogEntry;
-      })
-      .filter((item) => item.id && item.name);
-  } catch {
-    return [];
-  }
-}
-
-function mapMedicationToSystem(
-  medication: ScribeMedication,
-  systemCatalog: SystemCatalogEntry[],
-): ScribeMedication {
-  if (medication.systemId) return medication;
-
-  const diagnosisNorm = normalizeForMatch(medication.diagnosis);
-  if (!diagnosisNorm) return medication;
-
-  const matched = systemCatalog.find((system) => {
-    const systemName = normalizeForMatch(system.name);
-    if (systemName === diagnosisNorm || systemName.includes(diagnosisNorm)) {
-      return true;
+    const text = await fs.readFile(systemsPath, "utf8");
+    const parsed = safeParseJson<SystemCatalogEntry[]>(text);
+    if (Array.isArray(parsed)) {
+      return parsed;
     }
-
-    return system.diagnoses.some((diagnosis) => {
-      const diagnosisName = normalizeForMatch(diagnosis);
-      return (
-        diagnosisName === diagnosisNorm || diagnosisName.includes(diagnosisNorm)
-      );
-    });
-  });
-
-  if (!matched) return medication;
-
-  return {
-    ...medication,
-    systemId: matched.id,
-    diagnosis:
-      medication.diagnosis || matched.diagnoses[0] || matched.name || "",
-  };
+  } catch {
+    // ignore and fall through
+  }
+  return [] as SystemCatalogEntry[];
 }
 
 function buildExtractionSchema() {
@@ -342,17 +249,11 @@ function buildExtractionSchema() {
       intolerances: { type: "string" },
       chiefComplaint: { type: "string" },
       significantHistory: { type: "string" },
-      associatedSymptoms: {
-        type: "array",
-        items: { type: "string" },
-      },
+      associatedSymptoms: { type: "array", items: { type: "string" } },
       examFindings: { type: "string" },
       labSummary: { type: "string" },
       imagingSummary: { type: "string" },
-      diagnosisHints: {
-        type: "array",
-        items: { type: "string" },
-      },
+      diagnosisHints: { type: "array", items: { type: "string" } },
       reviewCompletedBy: { type: "string" },
       treatmentGoals: { type: "string" },
       nextReviewDate: { type: "string" },
@@ -386,10 +287,7 @@ function buildExtractionSchema() {
           ],
         },
       },
-      warnings: {
-        type: "array",
-        items: { type: "string" },
-      },
+      warnings: { type: "array", items: { type: "string" } },
     },
     required: [
       "patientName",
@@ -429,25 +327,16 @@ function buildSupportSchema() {
       summary: { type: "string" },
       likelyDiagnosis: { type: "string" },
       reasoning: { type: "string" },
-      medicationOptions: {
-        type: "array",
-        items: { type: "string" },
-      },
-      nextSteps: {
-        type: "array",
-        items: { type: "string" },
-      },
-      redFlags: {
-        type: "array",
-        items: { type: "string" },
-      },
+      currentTreatment: { type: "string" },
+      nextSteps: { type: "array", items: { type: "string" } },
+      redFlags: { type: "array", items: { type: "string" } },
       confidence: { type: "string" },
     },
     required: [
       "summary",
       "likelyDiagnosis",
       "reasoning",
-      "medicationOptions",
+      "currentTreatment",
       "nextSteps",
       "redFlags",
       "confidence",
@@ -455,52 +344,13 @@ function buildSupportSchema() {
   };
 }
 
-function buildResponseFormat(
-  model: string,
-  schemaName: string,
-  schema: Record<string, unknown>,
-) {
-  if (STRICT_SCHEMA_MODELS.has(model)) {
-    return {
-      type: "json_schema",
-      json_schema: {
-        name: schemaName,
-        strict: true,
-        schema,
-      },
-    };
-  }
-
-  if (BEST_EFFORT_SCHEMA_MODELS.has(model)) {
-    return {
-      type: "json_schema",
-      json_schema: {
-        name: schemaName,
-        strict: false,
-        schema,
-      },
-    };
-  }
-
-  return { type: "json_object" };
-}
-
 function buildExtractionPrompts(
   transcript: string,
-  systemCatalog: SystemCatalogEntry[],
-  schema: Record<string, unknown>,
+  systems: SystemCatalogEntry[],
 ) {
-  const systemsText = systemCatalog.length
-    ? systemCatalog
-        .map(
-          (system) =>
-            `- id:${system.id} | name:${system.name} | diagnoses:${system.diagnoses.join(", ")}`,
-        )
-        .join("\n")
-    : "No systems catalog provided.";
-
+  const schema = buildExtractionSchema();
   const medicationHints = process.env.GROQ_MEDICATION_HINTS?.trim() || "";
-
+  const systemsText = JSON.stringify(systems);
   const systemPrompt = `
 You are a medical documentation extraction assistant.
 
@@ -545,20 +395,20 @@ Field extraction guidance:
 - nextReviewMode: extract if stated
 - beforeNextReview: extract follow-up steps before next review
 - notes: extract additional useful clinical notes that do not fit cleanly elsewhere
-- medications: extract each medication row separately with: systemId, diagnosis, rawMedication, medication, dose, how, purpose, plan
+- medications: extract each medication row separately with systemId, diagnosis, rawMedication, medication, dose, how, purpose, plan
 - warnings: include extraction uncertainty or safety warnings only when needed
 
 Medication extraction rules:
-- Split medication name from dose whenever possible
-- Preserve exact medication identity
-- Extract how-to-take instructions as completely as possible
-- Extract purpose only if stated
-- Extract agreed plan only if stated
-- If multiple medications are mentioned, return multiple medication rows
-- Do not merge distinct medications into one row
-- Do not drop a medication that is clearly stated
+- Split medication name from dose whenever possible.
+- Preserve exact medication identity.
+- Extract how-to-take instructions as completely as possible.
+- Extract purpose only if stated.
+- Extract agreed plan only if stated.
+- If multiple medications are mentioned, return multiple medication rows.
+- Do not merge distinct medications into one row.
+- Do not drop a medication that is clearly stated.
 ${medicationHints ? `\nMedication hints:\n${medicationHints}` : ""}
-  `.trim();
+`.trim();
 
   const userPrompt = [
     "Schema:",
@@ -571,55 +421,52 @@ ${medicationHints ? `\nMedication hints:\n${medicationHints}` : ""}
     transcript,
   ].join("\n");
 
-  return { systemPrompt, userPrompt };
+  return { schema, systemPrompt, userPrompt };
 }
 
 function buildSupportPrompts(
   transcript: string,
   structured: StructuredPayload,
-  schema: Record<string, unknown>,
 ) {
+  const schema = buildSupportSchema();
   const systemPrompt = `
 You are an internal clinical support assistant for a medication review app.
-
-This output is INTERNAL ONLY.
-It must never appear in the printable patient report.
-
-Use only the transcript and extracted structured fields provided.
-Be helpful, practical, cautious, and clinically organized.
+This output is INTERNAL ONLY and must never be printed in the patient PDF.
+Use only the provided transcript and extracted structured data.
 
 Rules:
+- Be cautious, practical, and professional.
 - Do not invent facts not supported by the provided data.
-- If information is incomplete, say so clearly.
-- You may suggest likely diagnoses, common medication approaches, follow-up steps, and red flags, but always use cautious wording such as: likely, possible, may consider, commonly used, depending on clinical assessment.
-- Mention medication options only as possible clinical considerations, not definitive prescriptions.
-- If medications are already documented, mention them as current documented treatment.
-- If no medication is documented, you may mention common options that are typically considered for the likely condition, but clearly label them as possible options, not firm recommendations.
-- Do not use markdown.
-- Output plain English only.
-- Be concise but useful.
-- Return a valid JSON object only.
+- Do not label a case as hypertensive emergency, sepsis, acute crisis, urgent admission, or specialist referral unless the provided data clearly supports it with concrete findings.
+- Do not recommend IV medications, empiric antibiotics, admission, emergency referral, or specialist referral unless explicitly justified by the provided data.
+- If medication data is missing, say that current treatment is not documented.
+- If vital signs, labs, imaging, or examination details are missing, say the assessment is incomplete.
+- Prefer wording such as likely, possible, documented, appears consistent with, reassess, clinician review, or depends on full assessment.
+- Do not prescribe. Do not write direct treatment orders.
+- Mention currently documented medications only. Do not invent new medication names.
+- Keep the output concise and useful.
+- Return JSON only that matches the requested schema.
+`.trim();
 
-Return this exact structure:
-${JSON.stringify(schema)}
-  `.trim();
+  const userPrompt = [
+    "Transcript:",
+    transcript,
+    "",
+    "Structured data:",
+    JSON.stringify(structured),
+    "",
+    "Return an internal support object with a short summary, likely diagnosis, cautious reasoning, documented current treatment, suggested next steps, red flags, and a conservative confidence level.",
+  ].join("\n");
 
-  const userPrompt = `
-Transcript:
-${transcript}
-
-Structured data:
-${JSON.stringify(structured, null, 2)}
-  `.trim();
-
-  return { systemPrompt, userPrompt };
+  return { schema, systemPrompt, userPrompt };
 }
 
-async function requestGroqContent(params: {
+async function requestGroqJson<T>(params: {
   model: string;
   systemPrompt: string;
   userPrompt: string;
-  responseFormat: Record<string, unknown>;
+  schema: Record<string, unknown>;
+  timeoutMs?: number;
 }) {
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) {
@@ -627,10 +474,13 @@ async function requestGroqContent(params: {
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 45000);
+  const timeout = setTimeout(
+    () => controller.abort(),
+    params.timeoutMs ?? 45000,
+  );
 
   try {
-    const res = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
+    const response = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -644,260 +494,139 @@ async function requestGroqContent(params: {
           { role: "system", content: params.systemPrompt },
           { role: "user", content: params.userPrompt },
         ],
-        response_format: params.responseFormat,
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            name: "structured_response",
+            strict: false,
+            schema: params.schema,
+          },
+        },
       }),
     });
 
-    const raw = await res.text();
-    const parsed = safeParseJson<GroqChatCompletionResponse>(raw);
-
-    if (!res.ok) {
-      throw new Error(
-        `Groq request failed: ${res.status} ${parsed?.error?.message || raw}`,
-      );
+    const raw = await response.text();
+    if (!response.ok) {
+      throw new Error(`Groq request failed: ${response.status} ${raw}`);
     }
 
-    const content = parsed?.choices?.[0]?.message?.content;
-    if (typeof content !== "string" || !content.trim()) {
-      throw new Error("Groq returned empty content.");
+    const parsedEnvelope = safeParseJson<GroqChatCompletionResponse>(raw);
+    const content = parsedEnvelope?.choices?.[0]?.message?.content;
+    if (!content) {
+      throw new Error("Model returned empty content.");
     }
 
-    return content;
+    const parsed = safeParseJson<T>(content);
+    if (parsed) {
+      return parsed;
+    }
+
+    throw new Error("Failed to parse model JSON content.");
   } finally {
     clearTimeout(timeout);
   }
 }
 
-async function requestJsonWithFallback<T>(params: {
-  model: string;
-  schemaName: string;
-  schema: Record<string, unknown>;
-  systemPrompt: string;
-  userPrompt: string;
-  normalize: (value: unknown) => T;
-}) {
-  const primaryResponseFormat = buildResponseFormat(
-    params.model,
-    params.schemaName,
-    params.schema,
-  );
-
-  let content = "";
-  let parsed: unknown = null;
-  let usedJsonObjectFallback = false;
-
-  try {
-    content = await requestGroqContent({
-      model: params.model,
-      systemPrompt: params.systemPrompt,
-      userPrompt: params.userPrompt,
-      responseFormat: primaryResponseFormat,
-    });
-    parsed = safeParseJson(content);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    const schemaFailed = /json_validate_failed|Failed to generate JSON/i.test(
-      message,
-    );
-
-    if (!schemaFailed || primaryResponseFormat.type === "json_object") {
-      throw error;
-    }
-
-    usedJsonObjectFallback = true;
-    content = await requestGroqContent({
-      model: params.model,
-      systemPrompt: `${params.systemPrompt}\nReturn a valid JSON object only. Include every supported key exactly once. No markdown. No prose.`,
-      userPrompt: params.userPrompt,
-      responseFormat: { type: "json_object" },
-    });
-    parsed = safeParseJson(content);
-  }
-
-  if (
-    !parsed &&
-    !usedJsonObjectFallback &&
-    primaryResponseFormat.type !== "json_object"
-  ) {
-    content = await requestGroqContent({
-      model: params.model,
-      systemPrompt: `${params.systemPrompt}\nReturn a valid JSON object only. Include every supported key exactly once. No markdown. No prose.`,
-      userPrompt: params.userPrompt,
-      responseFormat: { type: "json_object" },
-    });
-    parsed = safeParseJson(content);
-  }
-
-  if (!parsed) {
-    throw new Error(`Failed to parse JSON from model output: ${content}`);
-  }
-
-  return params.normalize(parsed);
-}
-
-async function callGroqExtraction(
+async function extractStructuredPayload(
   transcript: string,
-  systemCatalog: SystemCatalogEntry[],
-): Promise<StructuredPayload> {
-  const model = DEFAULT_TEXT_MODEL;
-  const schema = buildExtractionSchema();
-  const { systemPrompt, userPrompt } = buildExtractionPrompts(
+  systems: SystemCatalogEntry[],
+) {
+  const { schema, systemPrompt, userPrompt } = buildExtractionPrompts(
     transcript,
-    systemCatalog,
-    schema,
+    systems,
   );
-
-  return requestJsonWithFallback({
-    model,
-    schemaName: "medical_scribe_draft",
-    schema,
+  const raw = await requestGroqJson<StructuredPayload>({
+    model: DEFAULT_EXTRACTION_MODEL,
     systemPrompt,
     userPrompt,
-    normalize: normalizeStructuredPayload,
+    schema,
   });
+  return normalizeStructuredPayload(raw);
 }
 
-async function callGroqClinicalSupport(
+async function generateAiClinicalSupport(
   transcript: string,
   structured: StructuredPayload,
-): Promise<AiClinicalSupport> {
-  const model = DEFAULT_TEXT_MODEL;
-  const schema = buildSupportSchema();
-  const { systemPrompt, userPrompt } = buildSupportPrompts(
-    transcript,
-    structured,
-    schema,
+) {
+  const hasMeaningfulData = Boolean(
+    structured.chiefComplaint ||
+    structured.significantHistory ||
+    structured.examFindings ||
+    structured.associatedSymptoms.length ||
+    structured.diagnosisHints.length ||
+    structured.medications.length,
   );
 
-  return requestJsonWithFallback({
-    model,
-    schemaName: "medical_clinical_support",
-    schema,
-    systemPrompt,
-    userPrompt,
-    normalize: normalizeClinicalSupport,
-  });
-}
+  if (!hasMeaningfulData) {
+    return normalizeAiClinicalSupport({
+      summary: "",
+      likelyDiagnosis: "",
+      reasoning: "",
+      currentTreatment: "Current treatment is not documented.",
+      nextSteps: [],
+      redFlags: [],
+      confidence: "low",
+    });
+  }
 
-function supportToSuggestionText(support: AiClinicalSupport) {
-  return [
-    support.summary,
-    support.reasoning,
-    support.medicationOptions.join(" "),
-    support.nextSteps.join(" "),
-    support.redFlags.join(" "),
-  ]
-    .map((part) => compactText(part))
-    .filter(Boolean)
-    .join(" ")
-    .trim();
+  try {
+    const { schema, systemPrompt, userPrompt } = buildSupportPrompts(
+      transcript,
+      structured,
+    );
+    const raw = await requestGroqJson<AiClinicalSupport>({
+      model: DEFAULT_SUPPORT_MODEL,
+      systemPrompt,
+      userPrompt,
+      schema,
+      timeoutMs: 30000,
+    });
+    return normalizeAiClinicalSupport(raw);
+  } catch {
+    return normalizeAiClinicalSupport({
+      summary: structured.chiefComplaint
+        ? `Case includes ${structured.chiefComplaint}.`
+        : "Clinical support unavailable for this transcript.",
+      likelyDiagnosis: structured.diagnosisHints[0] || "",
+      reasoning: structured.significantHistory
+        ? `Documented history: ${structured.significantHistory}.`
+        : "Assessment is limited because structured clinical details are incomplete.",
+      currentTreatment: structured.medications.length
+        ? structured.medications
+            .map((item) =>
+              [item.medication || item.rawMedication, item.dose]
+                .filter(Boolean)
+                .join(" "),
+            )
+            .filter(Boolean)
+            .join(", ")
+        : "Current treatment is not documented.",
+      nextSteps: structured.beforeNextReview
+        ? [structured.beforeNextReview]
+        : [],
+      redFlags: [],
+      confidence: "low",
+    });
+  }
 }
 
 export async function extractStructuredDraft(
-  rawTranscript: string,
+  transcript: string,
 ): Promise<StructuredDraft> {
-  const transcript = compactText(rawTranscript);
-
-  if (!transcript) {
-    return {
-      transcript: "",
-      patientName: "",
-      caseNumber: "",
-      dob: "",
-      age: "",
-      sex: "",
-      occupation: "",
-      supervisingDoctor: "",
-      carer: "",
-      allergies: "",
-      intolerances: "",
-      chiefComplaint: "",
-      significantHistory: "",
-      associatedSymptoms: [],
-      examFindings: "",
-      labSummary: "",
-      imagingSummary: "",
-      diagnosisHints: [],
-      reviewCompletedBy: "",
-      treatmentGoals: "",
-      nextReviewDate: "",
-      nextReviewMode: "",
-      beforeNextReview: "",
-      notes: "",
-      aiSuggestion: "",
-      aiClinicalSupport: {
-        summary: "",
-        likelyDiagnosis: "",
-        reasoning: "",
-        medicationOptions: [],
-        nextSteps: [],
-        redFlags: [],
-        confidence: "",
-      },
-      medications: [],
-      warnings: ["No transcript detected."],
-    };
-  }
-
-  const systemCatalog = await loadSystemCatalog();
-  const structured = await callGroqExtraction(transcript, systemCatalog);
-  const medications = structured.medications.map((item) =>
-    mapMedicationToSystem(item, systemCatalog),
+  const normalizedTranscript = compactText(transcript);
+  const systems = await loadSystems();
+  const structured = await extractStructuredPayload(
+    normalizedTranscript,
+    systems,
+  );
+  const aiClinicalSupport = await generateAiClinicalSupport(
+    normalizedTranscript,
+    structured,
   );
 
-  let aiClinicalSupport: AiClinicalSupport = {
-    summary: "",
-    likelyDiagnosis: "",
-    reasoning: "",
-    medicationOptions: [],
-    nextSteps: [],
-    redFlags: [],
-    confidence: "",
-  };
-
-  const warnings = [...structured.warnings];
-
-  try {
-    aiClinicalSupport = await callGroqClinicalSupport(transcript, {
-      ...structured,
-      medications,
-    });
-  } catch (error) {
-    warnings.push(
-      error instanceof Error
-        ? `AI clinical support unavailable: ${error.message}`
-        : "AI clinical support unavailable.",
-    );
-  }
-
   return {
-    transcript,
-    patientName: structured.patientName,
-    caseNumber: structured.caseNumber,
-    dob: structured.dob,
-    age: structured.age,
-    sex: structured.sex,
-    occupation: structured.occupation,
-    supervisingDoctor: structured.supervisingDoctor,
-    carer: structured.carer,
-    allergies: structured.allergies,
-    intolerances: structured.intolerances,
-    chiefComplaint: structured.chiefComplaint,
-    significantHistory: structured.significantHistory,
-    associatedSymptoms: dedupeStrings(structured.associatedSymptoms),
-    examFindings: structured.examFindings,
-    labSummary: structured.labSummary,
-    imagingSummary: structured.imagingSummary,
-    diagnosisHints: dedupeStrings(structured.diagnosisHints),
-    reviewCompletedBy: structured.reviewCompletedBy,
-    treatmentGoals: structured.treatmentGoals,
-    nextReviewDate: structured.nextReviewDate,
-    nextReviewMode: structured.nextReviewMode,
-    beforeNextReview: structured.beforeNextReview,
-    notes: structured.notes,
-    aiSuggestion: supportToSuggestionText(aiClinicalSupport),
+    transcript: normalizedTranscript,
+    ...structured,
     aiClinicalSupport,
-    medications,
-    warnings: dedupeStrings(warnings),
   };
 }
