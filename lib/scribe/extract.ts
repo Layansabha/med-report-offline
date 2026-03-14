@@ -12,6 +12,18 @@ export type ScribeMedication = {
   plan: string;
 };
 
+export type ConfidenceLevel = "" | "low" | "medium" | "high";
+
+export type AiClinicalSupport = {
+  summary: string;
+  likelyDiagnosis: string;
+  reasoning: string;
+  medicationOptions: string[];
+  nextSteps: string[];
+  redFlags: string[];
+  confidence: ConfidenceLevel;
+};
+
 export type StructuredDraft = {
   transcript: string;
   patientName: string;
@@ -38,24 +50,15 @@ export type StructuredDraft = {
   beforeNextReview: string;
   notes: string;
   aiSuggestion: string;
+  aiClinicalSupport: AiClinicalSupport;
   medications: ScribeMedication[];
   warnings: string[];
 };
 
-type StructuredPayload = Omit<StructuredDraft, "transcript">;
-
-type AiSupportConfidence = "low" | "medium" | "high";
-
-type AiClinicalSupportPayload = {
-  summary: string;
-  likelyDiagnosis: string;
-  reasoning: string;
-  currentTreatment: string;
-  medicationOptions: string[];
-  nextSteps: string[];
-  redFlags: string[];
-  confidence: AiSupportConfidence;
-};
+type StructuredPayload = Omit<
+  StructuredDraft,
+  "transcript" | "aiSuggestion" | "aiClinicalSupport"
+>;
 
 type SystemCatalogEntry = {
   id: string;
@@ -69,15 +72,20 @@ type GroqChatCompletionResponse = {
       content?: string;
     };
   }>;
+  error?: {
+    message?: string;
+  };
 };
 
 const GROQ_BASE_URL =
   process.env.GROQ_BASE_URL || "https://api.groq.com/openai/v1";
 const DEFAULT_TEXT_MODEL = process.env.GROQ_TEXT_MODEL || "openai/gpt-oss-20b";
+
 const STRICT_SCHEMA_MODELS = new Set([
   "openai/gpt-oss-20b",
   "openai/gpt-oss-120b",
 ]);
+
 const BEST_EFFORT_SCHEMA_MODELS = new Set([
   "openai/gpt-oss-20b",
   "openai/gpt-oss-120b",
@@ -94,16 +102,20 @@ function safeString(value: unknown) {
   return typeof value === "string" ? compactText(value) : "";
 }
 
-function safeMode(value: unknown): "" | "In-person" | "Video" {
-  const mode = safeString(value).toLowerCase();
-  if (!mode) return "";
-  if (mode === "in person" || mode === "in-person" || mode === "clinic") {
-    return "In-person";
+function dedupeStrings(values: string[]) {
+  const seen = new Set<string>();
+  const out: string[] = [];
+
+  for (const raw of values) {
+    const value = compactText(raw);
+    if (!value) continue;
+    const key = value.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
   }
-  if (mode === "video" || mode === "virtual" || mode === "telemedicine") {
-    return "Video";
-  }
-  return "";
+
+  return out;
 }
 
 function normalizeDate(value: unknown) {
@@ -119,22 +131,20 @@ function normalizeDate(value: unknown) {
   return `${yyyy}-${mm.padStart(2, "0")}-${dd.padStart(2, "0")}`;
 }
 
-function dedupeStrings(values: string[]) {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const item of values) {
-    const value = compactText(item);
-    if (!value) continue;
-    const key = value.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(value);
+function safeMode(value: unknown): "" | "In-person" | "Video" {
+  const mode = safeString(value).toLowerCase();
+  if (!mode) return "";
+  if (["in person", "in-person", "clinic", "face to face"].includes(mode)) {
+    return "In-person";
   }
-  return out;
+  if (["video", "virtual", "telemedicine", "telehealth"].includes(mode)) {
+    return "Video";
+  }
+  return "";
 }
 
 function cleanJsonText(text: string) {
-  return text
+  return (text || "")
     .trim()
     .replace(/^```json\s*/i, "")
     .replace(/^```\s*/i, "")
@@ -146,9 +156,11 @@ function extractJsonObject(text: string) {
   const cleaned = cleanJsonText(text);
   const first = cleaned.indexOf("{");
   const last = cleaned.lastIndexOf("}");
+
   if (first !== -1 && last !== -1 && last > first) {
     return cleaned.slice(first, last + 1);
   }
+
   return cleaned;
 }
 
@@ -221,7 +233,6 @@ function normalizeStructuredPayload(value: unknown): StructuredPayload {
     nextReviewMode: safeMode(payload.nextReviewMode),
     beforeNextReview: safeString(payload.beforeNextReview),
     notes: safeString(payload.notes),
-    aiSuggestion: safeString(payload.aiSuggestion),
     medications: Array.isArray(payload.medications)
       ? payload.medications
           .map(normalizeMedication)
@@ -233,21 +244,14 @@ function normalizeStructuredPayload(value: unknown): StructuredPayload {
   };
 }
 
-function normalizeConfidence(value: unknown): AiSupportConfidence {
-  const normalized = safeString(value).toLowerCase();
-  if (normalized === "high") return "high";
-  if (normalized === "medium") return "medium";
-  return "low";
-}
-
-function normalizeAiSupportPayload(value: unknown): AiClinicalSupportPayload {
+function normalizeClinicalSupport(value: unknown): AiClinicalSupport {
   const payload = (value ?? {}) as Record<string, unknown>;
+  const confidence = safeString(payload.confidence).toLowerCase();
 
   return {
     summary: safeString(payload.summary),
     likelyDiagnosis: safeString(payload.likelyDiagnosis),
     reasoning: safeString(payload.reasoning),
-    currentTreatment: safeString(payload.currentTreatment),
     medicationOptions: Array.isArray(payload.medicationOptions)
       ? dedupeStrings(payload.medicationOptions.map((item) => safeString(item)))
       : [],
@@ -257,58 +261,11 @@ function normalizeAiSupportPayload(value: unknown): AiClinicalSupportPayload {
     redFlags: Array.isArray(payload.redFlags)
       ? dedupeStrings(payload.redFlags.map((item) => safeString(item)))
       : [],
-    confidence: normalizeConfidence(payload.confidence),
+    confidence:
+      confidence === "high" || confidence === "medium" || confidence === "low"
+        ? (confidence as ConfidenceLevel)
+        : "",
   };
-}
-
-function formatMedicationSummary(medications: ScribeMedication[]) {
-  const parts = medications
-    .map((item) => {
-      const med = safeString(item.medication || item.rawMedication);
-      const dose = safeString(item.dose);
-      const how = safeString(item.how);
-      const joined = [med, dose].filter(Boolean).join(" ").trim();
-      return [joined, how ? `(${how})` : ""].filter(Boolean).join(" ").trim();
-    })
-    .filter(Boolean);
-
-  return parts.join("; ");
-}
-
-function formatAiSupportText(payload: AiClinicalSupportPayload) {
-  const lines: string[] = [];
-
-  if (payload.summary) {
-    lines.push(`Summary: ${payload.summary}`);
-  }
-  if (payload.likelyDiagnosis) {
-    lines.push(`Likely diagnosis: ${payload.likelyDiagnosis}`);
-  }
-  if (payload.reasoning) {
-    lines.push(`Why this fits: ${payload.reasoning}`);
-  }
-  if (payload.currentTreatment) {
-    lines.push(`Current documented treatment: ${payload.currentTreatment}`);
-  }
-  if (payload.medicationOptions.length) {
-    lines.push(
-      `Common options to consider: ${payload.medicationOptions.join("; ")}`,
-    );
-  }
-  if (payload.nextSteps.length) {
-    lines.push(`Suggested next steps: ${payload.nextSteps.join("; ")}`);
-  }
-  if (payload.redFlags.length) {
-    lines.push(`Red flags: ${payload.redFlags.join("; ")}`);
-  }
-  lines.push(
-    `Confidence: ${payload.confidence[0].toUpperCase()}${payload.confidence.slice(1)}`,
-  );
-  lines.push(
-    "Internal support only. Final diagnosis and treatment decisions require clinician review.",
-  );
-
-  return lines.join("\n").trim();
 }
 
 async function loadSystemCatalog(): Promise<SystemCatalogEntry[]> {
@@ -339,14 +296,10 @@ function mapMedicationToSystem(
   medication: ScribeMedication,
   systemCatalog: SystemCatalogEntry[],
 ): ScribeMedication {
-  if (medication.systemId) {
-    return medication;
-  }
+  if (medication.systemId) return medication;
 
   const diagnosisNorm = normalizeForMatch(medication.diagnosis);
-  if (!diagnosisNorm) {
-    return medication;
-  }
+  if (!diagnosisNorm) return medication;
 
   const matched = systemCatalog.find((system) => {
     const systemName = normalizeForMatch(system.name);
@@ -362,9 +315,7 @@ function mapMedicationToSystem(
     });
   });
 
-  if (!matched) {
-    return medication;
-  }
+  if (!matched) return medication;
 
   return {
     ...medication,
@@ -374,7 +325,7 @@ function mapMedicationToSystem(
   };
 }
 
-function buildSchema() {
+function buildExtractionSchema() {
   return {
     type: "object",
     additionalProperties: false,
@@ -391,11 +342,17 @@ function buildSchema() {
       intolerances: { type: "string" },
       chiefComplaint: { type: "string" },
       significantHistory: { type: "string" },
-      associatedSymptoms: { type: "array", items: { type: "string" } },
+      associatedSymptoms: {
+        type: "array",
+        items: { type: "string" },
+      },
       examFindings: { type: "string" },
       labSummary: { type: "string" },
       imagingSummary: { type: "string" },
-      diagnosisHints: { type: "array", items: { type: "string" } },
+      diagnosisHints: {
+        type: "array",
+        items: { type: "string" },
+      },
       reviewCompletedBy: { type: "string" },
       treatmentGoals: { type: "string" },
       nextReviewDate: { type: "string" },
@@ -429,7 +386,10 @@ function buildSchema() {
           ],
         },
       },
-      warnings: { type: "array", items: { type: "string" } },
+      warnings: {
+        type: "array",
+        items: { type: "string" },
+      },
     },
     required: [
       "patientName",
@@ -461,15 +421,50 @@ function buildSchema() {
   };
 }
 
+function buildSupportSchema() {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      summary: { type: "string" },
+      likelyDiagnosis: { type: "string" },
+      reasoning: { type: "string" },
+      medicationOptions: {
+        type: "array",
+        items: { type: "string" },
+      },
+      nextSteps: {
+        type: "array",
+        items: { type: "string" },
+      },
+      redFlags: {
+        type: "array",
+        items: { type: "string" },
+      },
+      confidence: { type: "string" },
+    },
+    required: [
+      "summary",
+      "likelyDiagnosis",
+      "reasoning",
+      "medicationOptions",
+      "nextSteps",
+      "redFlags",
+      "confidence",
+    ],
+  };
+}
+
 function buildResponseFormat(
   model: string,
-  schema: ReturnType<typeof buildSchema>,
+  schemaName: string,
+  schema: Record<string, unknown>,
 ) {
   if (STRICT_SCHEMA_MODELS.has(model)) {
     return {
       type: "json_schema",
       json_schema: {
-        name: "medical_scribe_draft",
+        name: schemaName,
         strict: true,
         schema,
       },
@@ -480,7 +475,7 @@ function buildResponseFormat(
     return {
       type: "json_schema",
       json_schema: {
-        name: "medical_scribe_draft",
+        name: schemaName,
         strict: false,
         schema,
       },
@@ -490,10 +485,10 @@ function buildResponseFormat(
   return { type: "json_object" };
 }
 
-function buildPrompts(
+function buildExtractionPrompts(
   transcript: string,
   systemCatalog: SystemCatalogEntry[],
-  schema: ReturnType<typeof buildSchema>,
+  schema: Record<string, unknown>,
 ) {
   const systemsText = systemCatalog.length
     ? systemCatalog
@@ -509,9 +504,8 @@ function buildPrompts(
   const systemPrompt = `
 You are a medical documentation extraction assistant.
 
-Your task is to extract structured clinical information from a dictated visit transcript.
+Your task is to extract structured clinical information from a dictated transcript.
 The transcript may contain Arabic, English, or mixed Arabic-English speech in the same sentence.
-
 Return ONLY valid JSON that matches the required schema exactly.
 
 Important rules:
@@ -519,17 +513,18 @@ Important rules:
 - If a field is not mentioned, return an empty string for text fields or an empty array for list fields.
 - Do not invent facts.
 - Do not guess unsupported diagnoses or unsupported treatments.
-- Patient names spoken in Arabic should be written in natural English spelling using best-effort transliteration.
+- Patient name should be written in English spelling when spoken in Arabic, using best-effort transliteration.
 - Keep medication names exactly as clinically intended.
+- Preserve medically relevant wording.
 - Use concise, clean clinical English in extracted fields.
 - Do not output markdown.
 - Do not output explanations.
 - Do not output anything except valid JSON.
 
 Field extraction guidance:
-- patientName: extract the full patient name and transliterate Arabic names into English spelling when needed
+- patientName: extract full patient name and transliterate Arabic names into English spelling if needed
 - caseNumber: extract MRN, case number, or file number
-- dob: extract date of birth only if stated
+- dob: extract date of birth if explicitly stated
 - age: extract age if stated
 - sex: extract male/female if stated
 - occupation: extract occupation if stated
@@ -537,40 +532,33 @@ Field extraction guidance:
 - carer: extract carer or representative if stated
 - allergies: extract known allergies if stated
 - intolerances: extract medication intolerances if stated
-- chiefComplaint: extract the main reason for visit
+- chiefComplaint: extract main reason for visit
 - significantHistory: extract important past medical history
-- associatedSymptoms: extract symptoms clearly linked to the complaint
-- examFindings: extract examination findings, vital signs, and documented observations
+- associatedSymptoms: extract symptoms clearly associated with the complaint
+- examFindings: extract examination findings, vitals, or documented observations
 - labSummary: extract laboratory information if stated
 - imagingSummary: extract imaging information if stated
-- diagnosisHints: extract likely documented diagnoses clearly supported by the transcript
+- diagnosisHints: extract likely documented diagnoses explicitly supported by the transcript
 - reviewCompletedBy: extract if stated
 - treatmentGoals: extract if stated
-- nextReviewDate: extract if a clear next review date is stated
-- nextReviewMode: extract In-person or Video only when clearly supported
-- beforeNextReview: extract tasks or monitoring requested before the next review
-- notes: extract clinically useful extra information that does not fit cleanly elsewhere
-- warnings: only include extraction or uncertainty warnings when needed
+- nextReviewDate: extract if stated
+- nextReviewMode: extract if stated
+- beforeNextReview: extract follow-up steps before next review
+- notes: extract additional useful clinical notes that do not fit cleanly elsewhere
+- medications: extract each medication row separately with: systemId, diagnosis, rawMedication, medication, dose, how, purpose, plan
+- warnings: include extraction uncertainty or safety warnings only when needed
 
 Medication extraction rules:
-- Extract each medication as a separate row.
-- Do not merge distinct medications into one row.
-- Do not drop a medication that is clearly stated.
-- Preserve the exact medication identity.
-- Split medication name from dose whenever possible.
-- Keep how-to-take instructions as completely as possible.
-- If the transcript says "one tablet twice daily after meals", keep the full instruction, not a shortened fragment.
-- Keep purpose only if stated or strongly implied by the same medication statement.
-- Keep agreed plan only if stated.
-- Map systemId to the closest supported system when diagnosis or system is clear from the transcript and the available systems list.
-
-${
-  medicationHints
-    ? `Medication hints:
-${medicationHints}`
-    : ""
-}
-`.trim();
+- Split medication name from dose whenever possible
+- Preserve exact medication identity
+- Extract how-to-take instructions as completely as possible
+- Extract purpose only if stated
+- Extract agreed plan only if stated
+- If multiple medications are mentioned, return multiple medication rows
+- Do not merge distinct medications into one row
+- Do not drop a medication that is clearly stated
+${medicationHints ? `\nMedication hints:\n${medicationHints}` : ""}
+  `.trim();
 
   const userPrompt = [
     "Schema:",
@@ -586,97 +574,48 @@ ${medicationHints}`
   return { systemPrompt, userPrompt };
 }
 
-function buildAiSupportSchema() {
-  return {
-    type: "object",
-    additionalProperties: false,
-    properties: {
-      summary: { type: "string" },
-      likelyDiagnosis: { type: "string" },
-      reasoning: { type: "string" },
-      currentTreatment: { type: "string" },
-      medicationOptions: { type: "array", items: { type: "string" } },
-      nextSteps: { type: "array", items: { type: "string" } },
-      redFlags: { type: "array", items: { type: "string" } },
-      confidence: { type: "string" },
-    },
-    required: [
-      "summary",
-      "likelyDiagnosis",
-      "reasoning",
-      "currentTreatment",
-      "medicationOptions",
-      "nextSteps",
-      "redFlags",
-      "confidence",
-    ],
-  };
-}
-
-function buildAiSupportPrompts(
+function buildSupportPrompts(
   transcript: string,
   structured: StructuredPayload,
-  medications: ScribeMedication[],
+  schema: Record<string, unknown>,
 ) {
-  const structuredInput = {
-    patientName: structured.patientName,
-    age: structured.age,
-    sex: structured.sex,
-    chiefComplaint: structured.chiefComplaint,
-    significantHistory: structured.significantHistory,
-    associatedSymptoms: structured.associatedSymptoms,
-    examFindings: structured.examFindings,
-    labSummary: structured.labSummary,
-    imagingSummary: structured.imagingSummary,
-    diagnosisHints: structured.diagnosisHints,
-    currentTreatment: formatMedicationSummary(medications),
-    medications,
-    treatmentGoals: structured.treatmentGoals,
-    nextReviewDate: structured.nextReviewDate,
-    nextReviewMode: structured.nextReviewMode,
-    beforeNextReview: structured.beforeNextReview,
-    notes: structured.notes,
-  };
-
   const systemPrompt = `
-You are an internal clinical support assistant for a medical documentation app.
+You are an internal clinical support assistant for a medication review app.
 
-This output is INTERNAL ONLY for the clinician or staff member inside the app.
-It must never be included in the printable patient report.
+This output is INTERNAL ONLY.
+It must never appear in the printable patient report.
 
-Use only the transcript and extracted structured data that you are given.
-Be helpful, practical, and professionally cautious.
+Use only the transcript and extracted structured fields provided.
+Be helpful, practical, cautious, and clinically organized.
 
 Rules:
-- Do not invent facts that are not supported by the transcript or structured data.
+- Do not invent facts not supported by the provided data.
 - If information is incomplete, say so clearly.
-- You may suggest likely diagnoses, common medication approaches, next steps, and red flags, but always use cautious wording such as: likely, possible, may consider, commonly used, depending on clinical assessment.
+- You may suggest likely diagnoses, common medication approaches, follow-up steps, and red flags, but always use cautious wording such as: likely, possible, may consider, commonly used, depending on clinical assessment.
+- Mention medication options only as possible clinical considerations, not definitive prescriptions.
 - If medications are already documented, mention them as current documented treatment.
-- Do not recommend adding a medication that is already documented.
-- Do not suggest specialist referral unless clearly supported.
-- Do not present a definitive diagnosis unless the case strongly supports it.
+- If no medication is documented, you may mention common options that are typically considered for the likely condition, but clearly label them as possible options, not firm recommendations.
 - Do not use markdown.
 - Output plain English only.
-- Return valid JSON only.
+- Be concise but useful.
+- Return a valid JSON object only.
 
-The medicationOptions field may include common options that are often considered for the likely diagnosis, but they must be phrased as possibilities for clinician consideration, not definitive prescriptions.
-`.trim();
+Return this exact structure:
+${JSON.stringify(schema)}
+  `.trim();
 
-  const userPrompt = [
-    "Transcript:",
-    transcript,
-    "",
-    "Structured data:",
-    JSON.stringify(structuredInput, null, 2),
-    "",
-    "Return this exact JSON shape:",
-    JSON.stringify(buildAiSupportSchema()),
-  ].join("\n");
+  const userPrompt = `
+Transcript:
+${transcript}
+
+Structured data:
+${JSON.stringify(structured, null, 2)}
+  `.trim();
 
   return { systemPrompt, userPrompt };
 }
 
-async function requestGroqExtraction(params: {
+async function requestGroqContent(params: {
   model: string;
   systemPrompt: string;
   userPrompt: string;
@@ -710,16 +649,17 @@ async function requestGroqExtraction(params: {
     });
 
     const raw = await res.text();
+    const parsed = safeParseJson<GroqChatCompletionResponse>(raw);
 
     if (!res.ok) {
-      throw new Error(`Groq extraction failed: ${res.status} ${raw}`);
+      throw new Error(
+        `Groq request failed: ${res.status} ${parsed?.error?.message || raw}`,
+      );
     }
 
-    const parsed = safeParseJson<GroqChatCompletionResponse>(raw);
     const content = parsed?.choices?.[0]?.message?.content;
-
     if (typeof content !== "string" || !content.trim()) {
-      throw new Error("Groq returned empty extraction content.");
+      throw new Error("Groq returned empty content.");
     }
 
     return content;
@@ -728,31 +668,32 @@ async function requestGroqExtraction(params: {
   }
 }
 
-async function callGroqExtraction(
-  transcript: string,
-  systemCatalog: SystemCatalogEntry[],
-): Promise<StructuredPayload> {
-  const model = DEFAULT_TEXT_MODEL;
-  const schema = buildSchema();
-  const { systemPrompt, userPrompt } = buildPrompts(
-    transcript,
-    systemCatalog,
-    schema,
+async function requestJsonWithFallback<T>(params: {
+  model: string;
+  schemaName: string;
+  schema: Record<string, unknown>;
+  systemPrompt: string;
+  userPrompt: string;
+  normalize: (value: unknown) => T;
+}) {
+  const primaryResponseFormat = buildResponseFormat(
+    params.model,
+    params.schemaName,
+    params.schema,
   );
-  const primaryResponseFormat = buildResponseFormat(model, schema);
 
   let content = "";
-  let parsed: StructuredPayload | null = null;
+  let parsed: unknown = null;
   let usedJsonObjectFallback = false;
 
   try {
-    content = await requestGroqExtraction({
-      model,
-      systemPrompt,
-      userPrompt,
+    content = await requestGroqContent({
+      model: params.model,
+      systemPrompt: params.systemPrompt,
+      userPrompt: params.userPrompt,
       responseFormat: primaryResponseFormat,
     });
-    parsed = safeParseJson<StructuredPayload>(content);
+    parsed = safeParseJson(content);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const schemaFailed = /json_validate_failed|Failed to generate JSON/i.test(
@@ -764,13 +705,13 @@ async function callGroqExtraction(
     }
 
     usedJsonObjectFallback = true;
-    content = await requestGroqExtraction({
-      model,
-      systemPrompt: `${systemPrompt} Return a valid JSON object only. Include every supported key exactly once. No markdown. No prose.`,
-      userPrompt,
+    content = await requestGroqContent({
+      model: params.model,
+      systemPrompt: `${params.systemPrompt}\nReturn a valid JSON object only. Include every supported key exactly once. No markdown. No prose.`,
+      userPrompt: params.userPrompt,
       responseFormat: { type: "json_object" },
     });
-    parsed = safeParseJson<StructuredPayload>(content);
+    parsed = safeParseJson(content);
   }
 
   if (
@@ -778,75 +719,84 @@ async function callGroqExtraction(
     !usedJsonObjectFallback &&
     primaryResponseFormat.type !== "json_object"
   ) {
-    content = await requestGroqExtraction({
-      model,
-      systemPrompt: `${systemPrompt} Return a valid JSON object only. Include every supported key exactly once. No markdown. No prose.`,
-      userPrompt,
+    content = await requestGroqContent({
+      model: params.model,
+      systemPrompt: `${params.systemPrompt}\nReturn a valid JSON object only. Include every supported key exactly once. No markdown. No prose.`,
+      userPrompt: params.userPrompt,
       responseFormat: { type: "json_object" },
     });
-    parsed = safeParseJson<StructuredPayload>(content);
+    parsed = safeParseJson(content);
   }
 
   if (!parsed) {
-    throw new Error(
-      `Failed to parse structured JSON from model output: ${content}`,
-    );
+    throw new Error(`Failed to parse JSON from model output: ${content}`);
   }
 
-  return normalizeStructuredPayload(parsed);
+  return params.normalize(parsed);
 }
 
-async function callGroqAiSupport(
+async function callGroqExtraction(
   transcript: string,
-  structured: StructuredPayload,
-  medications: ScribeMedication[],
-): Promise<string> {
-  const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) {
-    return "AI clinical support unavailable because GROQ_API_KEY is missing.";
-  }
-
-  const model = process.env.GROQ_SUPPORT_MODEL || DEFAULT_TEXT_MODEL;
-  const schema = buildAiSupportSchema();
-  const { systemPrompt, userPrompt } = buildAiSupportPrompts(
+  systemCatalog: SystemCatalogEntry[],
+): Promise<StructuredPayload> {
+  const model = DEFAULT_TEXT_MODEL;
+  const schema = buildExtractionSchema();
+  const { systemPrompt, userPrompt } = buildExtractionPrompts(
     transcript,
-    structured,
-    medications,
+    systemCatalog,
+    schema,
   );
 
-  try {
-    const content = await requestGroqExtraction({
-      model,
-      systemPrompt,
-      userPrompt,
-      responseFormat: { type: "json_object" },
-    });
+  return requestJsonWithFallback({
+    model,
+    schemaName: "medical_scribe_draft",
+    schema,
+    systemPrompt,
+    userPrompt,
+    normalize: normalizeStructuredPayload,
+  });
+}
 
-    const parsed = safeParseJson<AiClinicalSupportPayload>(content);
-    if (!parsed) {
-      const fallback = safeString(content);
-      return (
-        fallback ||
-        "AI clinical support was not generated from the current transcript."
-      );
-    }
+async function callGroqClinicalSupport(
+  transcript: string,
+  structured: StructuredPayload,
+): Promise<AiClinicalSupport> {
+  const model = DEFAULT_TEXT_MODEL;
+  const schema = buildSupportSchema();
+  const { systemPrompt, userPrompt } = buildSupportPrompts(
+    transcript,
+    structured,
+    schema,
+  );
 
-    const normalized = normalizeAiSupportPayload(parsed);
-    const formatted = formatAiSupportText(normalized);
-    return (
-      formatted ||
-      "AI clinical support was not generated from the current transcript."
-    );
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return `AI clinical support unavailable. ${message}`.trim();
-  }
+  return requestJsonWithFallback({
+    model,
+    schemaName: "medical_clinical_support",
+    schema,
+    systemPrompt,
+    userPrompt,
+    normalize: normalizeClinicalSupport,
+  });
+}
+
+function supportToSuggestionText(support: AiClinicalSupport) {
+  return [
+    support.summary,
+    support.reasoning,
+    support.medicationOptions.join(" "),
+    support.nextSteps.join(" "),
+    support.redFlags.join(" "),
+  ]
+    .map((part) => compactText(part))
+    .filter(Boolean)
+    .join(" ")
+    .trim();
 }
 
 export async function extractStructuredDraft(
   rawTranscript: string,
 ): Promise<StructuredDraft> {
-  const transcript = (rawTranscript || "").replace(/\r/g, "").trim();
+  const transcript = compactText(rawTranscript);
 
   if (!transcript) {
     return {
@@ -875,6 +825,15 @@ export async function extractStructuredDraft(
       beforeNextReview: "",
       notes: "",
       aiSuggestion: "",
+      aiClinicalSupport: {
+        summary: "",
+        likelyDiagnosis: "",
+        reasoning: "",
+        medicationOptions: [],
+        nextSteps: [],
+        redFlags: [],
+        confidence: "",
+      },
       medications: [],
       warnings: ["No transcript detected."],
     };
@@ -885,11 +844,31 @@ export async function extractStructuredDraft(
   const medications = structured.medications.map((item) =>
     mapMedicationToSystem(item, systemCatalog),
   );
-  const aiSuggestion = await callGroqAiSupport(
-    transcript,
-    structured,
-    medications,
-  );
+
+  let aiClinicalSupport: AiClinicalSupport = {
+    summary: "",
+    likelyDiagnosis: "",
+    reasoning: "",
+    medicationOptions: [],
+    nextSteps: [],
+    redFlags: [],
+    confidence: "",
+  };
+
+  const warnings = [...structured.warnings];
+
+  try {
+    aiClinicalSupport = await callGroqClinicalSupport(transcript, {
+      ...structured,
+      medications,
+    });
+  } catch (error) {
+    warnings.push(
+      error instanceof Error
+        ? `AI clinical support unavailable: ${error.message}`
+        : "AI clinical support unavailable.",
+    );
+  }
 
   return {
     transcript,
@@ -916,8 +895,9 @@ export async function extractStructuredDraft(
     nextReviewMode: structured.nextReviewMode,
     beforeNextReview: structured.beforeNextReview,
     notes: structured.notes,
-    aiSuggestion,
+    aiSuggestion: supportToSuggestionText(aiClinicalSupport),
+    aiClinicalSupport,
     medications,
-    warnings: dedupeStrings(structured.warnings),
+    warnings: dedupeStrings(warnings),
   };
 }

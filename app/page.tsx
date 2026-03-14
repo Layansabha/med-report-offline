@@ -1,17 +1,13 @@
 "use client";
 
-import {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type Dispatch,
-  type SetStateAction,
-  type ReactNode,
-} from "react";
-import VoiceScribe, { type ScribeDraft } from "../components/VoiceScribe";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import VoiceScribe, {
+  type AiClinicalSupport,
+  type ScribeDraft,
+  type ScribeMedication,
+} from "../components/VoiceScribe";
 
-type TabKey = "patient" | "meds" | "review";
+type TabKey = "patient" | "medications" | "review";
 type ExportLanguage = "en" | "ar";
 
 type SystemCatalog = {
@@ -35,18 +31,6 @@ type MedicationSection = {
   diagnosis: string;
   diagnosisDate: string;
   rows: MedicationRow[];
-};
-
-type ToastState = null | {
-  message: string;
-};
-
-type SuggestionState = {
-  medications: string[];
-  doses: string[];
-  how: string[];
-  purposes: string[];
-  plans: string[];
 };
 
 type ReportRow = {
@@ -82,7 +66,21 @@ type ReportPayload = {
   rows: ReportRow[];
 };
 
-const STORAGE_KEY = "imr_v5_business";
+type ToastState = null | {
+  message: string;
+  tone: "success" | "error";
+};
+
+type SuggestionStore = {
+  medications: string[];
+  doses: string[];
+  how: string[];
+  purposes: string[];
+  plans: string[];
+};
+
+const STORAGE_KEY = "imr_v6_complete";
+
 const DEFAULT_HOW_OPTIONS = [
   "Take with Food",
   "Take on an Empty Stomach",
@@ -99,25 +97,27 @@ const DEFAULT_HOW_OPTIONS = [
   "Take Three Times Daily",
   "Take Every Other Day",
   "Take as Directed by Physician",
-  "Take with a Spoonful of Water (for dissolvable tablets)",
-  "Take Without Chewing (for slow-release or coated tablets)",
+  "Take with a Spoonful of Water",
+  "Take Without Chewing",
   "Take Entire Dose at Once",
-  "Take in Divided Doses (split throughout the day)",
+  "Take in Divided Doses",
   "Dissolve in Water Before Taking",
-  "Shake Well Before Use (for suspensions)",
-  "Apply Topically (for creams or ointments)",
+  "Shake Well Before Use",
+  "Apply Topically",
   "Use as Eye Drops",
   "Take weekly with fatty meals",
   "Take at night with orange or lemon",
   "Take 2 every 12 hours",
   "Take 1/2 tablet in the morning",
 ];
+
 const DEFAULT_PLAN_OPTIONS = [
   "Lab tests",
   "Blood pressure readings",
   "DXA scan",
   "Medication review with Consultant",
 ];
+
 const DEFAULT_DOSE_OPTIONS = [
   "2.5 mg",
   "5 mg",
@@ -145,7 +145,7 @@ function uid() {
   return Math.random().toString(36).slice(2, 10);
 }
 
-function todayISO(): string {
+function todayISO() {
   const d = new Date();
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");
@@ -157,17 +157,21 @@ function normalize(value: string) {
   return (value ?? "").trim().toLowerCase();
 }
 
+function compactText(value: string) {
+  return (value || "").replace(/\s+/g, " ").trim();
+}
+
 function uniqKeepOrder(values: string[]) {
   const seen = new Set<string>();
   const out: string[] = [];
 
-  for (const value of values) {
-    const next = value.trim();
-    if (!next) continue;
-    const key = next.toLowerCase();
+  for (const raw of values) {
+    const value = compactText(raw);
+    if (!value) continue;
+    const key = value.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push(next);
+    out.push(value);
   }
 
   return out;
@@ -179,15 +183,41 @@ function toInputDate(value: string) {
   if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
   if (/^\d{4}\/\d{2}\/\d{2}$/.test(raw)) return raw.replaceAll("/", "-");
 
-  const match = raw.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+  const match = raw.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})$/);
   if (!match) return "";
-
   const [, dd, mm, yyyy] = match;
   return `${yyyy}-${mm.padStart(2, "0")}-${dd.padStart(2, "0")}`;
 }
 
+function fromInputDate(value: string) {
+  return toInputDate(value);
+}
+
 function englishFallback(value: string) {
   return value || "—";
+}
+
+function createMedicationRow(initial?: Partial<MedicationRow>): MedicationRow {
+  return {
+    id: uid(),
+    medication: initial?.medication || "",
+    dose: initial?.dose || "",
+    how: initial?.how || "",
+    purpose: initial?.purpose || "",
+    plan: initial?.plan || "",
+  };
+}
+
+function createSection(
+  initial?: Partial<MedicationSection>,
+): MedicationSection {
+  return {
+    id: uid(),
+    systemId: initial?.systemId || "",
+    diagnosis: initial?.diagnosis || "",
+    diagnosisDate: initial?.diagnosisDate || "",
+    rows: initial?.rows?.length ? initial.rows : [createMedicationRow()],
+  };
 }
 
 function buildReportPayload(params: {
@@ -244,6 +274,32 @@ function buildReportPayload(params: {
       }));
     }),
   };
+}
+
+function buildCard(label: string, value: string) {
+  return `
+    <div style="border:1px solid #e2e8f0;border-radius:18px;padding:12px 14px;background:#fff;min-height:76px;">
+      ${
+        label
+          ? `<div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:#64748b;font-weight:700;margin-bottom:8px;">${escapeHtml(
+              label,
+            )}</div>`
+          : ""
+      }
+      <div style="font-size:14px;line-height:1.6;color:#0f172a;white-space:pre-wrap;">${escapeHtml(
+        value,
+      )}</div>
+    </div>
+  `;
+}
+
+function escapeHtml(value: string) {
+  return (value || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
 function buildPrintHtml(payload: ReportPayload) {
@@ -328,137 +384,63 @@ function buildPrintHtml(payload: ReportPayload) {
           `;
         })
         .join("")
-    : `
-      <tr>
-        <td colspan="6" class="empty-row">${escapeHtml(labels.empty)}</td>
-      </tr>
-    `;
+    : `<tr><td colspan="6">${escapeHtml(labels.empty)}</td></tr>`;
 
-  return `<!doctype html>
-<html lang="${isArabic ? "ar" : "en"}" dir="${dir}">
-  <head>
-    <meta charset="utf-8" />
-    <title>${escapeHtml(payload.title)}</title>
-    <style>
-      * { box-sizing: border-box; }
-      body {
-        margin: 0;
-        padding: 32px;
-        font-family: Arial, Helvetica, sans-serif;
-        color: #0f172a;
-        background: white;
-      }
-      .page { max-width: 1120px; margin: 0 auto; }
-      .header {
-        display: flex;
-        justify-content: space-between;
-        align-items: flex-start;
-        gap: 24px;
-        border-bottom: 2px solid #e2e8f0;
-        padding-bottom: 16px;
-      }
-      h1 { margin: 0; font-size: 28px; }
-      .muted { color: #64748b; font-size: 13px; margin-top: 6px; }
-      .section { margin-top: 24px; }
-      .section-title {
-        font-size: 13px;
-        font-weight: 700;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        color: #475569;
-        margin-bottom: 12px;
-      }
-      .grid {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 12px;
-      }
-      .card {
-        border: 1px solid #e2e8f0;
-        border-radius: 16px;
-        padding: 12px 14px;
-        background: #f8fafc;
-        min-height: 68px;
-      }
-      .label {
-        font-size: 12px;
-        color: #64748b;
-        margin-bottom: 6px;
-      }
-      .value {
-        font-size: 14px;
-        line-height: 1.55;
-        white-space: pre-wrap;
-      }
-      table {
-        width: 100%;
-        border-collapse: collapse;
-        border: 1px solid #e2e8f0;
-        border-radius: 16px;
-        overflow: hidden;
-      }
-      thead th {
-        background: #eff6ff;
-        color: #1e3a8a;
-        font-size: 12px;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-      }
-      th, td {
-        border-bottom: 1px solid #e2e8f0;
-        padding: 12px;
-        text-align: ${isArabic ? "right" : "left"};
-        vertical-align: top;
-        font-size: 13px;
-        line-height: 1.5;
-      }
-      tr:last-child td { border-bottom: none; }
-      .empty-row { text-align: center; color: #64748b; }
-      @media print {
-        body { padding: 0; }
-        .page { max-width: 100%; }
-      }
-    </style>
-  </head>
-  <body>
-    <div class="page">
-      <div class="header">
+  return `
+  <!doctype html>
+  <html lang="${isArabic ? "ar" : "en"}" dir="${dir}">
+    <head>
+      <meta charset="utf-8" />
+      <title>${escapeHtml(payload.title)}</title>
+      <style>
+        *{box-sizing:border-box}
+        body{font-family:Inter,Arial,sans-serif;margin:0;background:#fff;color:#0f172a;padding:24px}
+        .hero{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:18px}
+        .title{font-size:24px;font-weight:800;margin:0}
+        .sub{font-size:12px;color:#64748b;margin-top:6px}
+        .section{margin-top:20px}
+        .section h2{font-size:13px;letter-spacing:.14em;text-transform:uppercase;color:#475569;margin:0 0 12px;font-weight:800}
+        .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+        table{width:100%;border-collapse:collapse;border:1px solid #e2e8f0;border-radius:16px;overflow:hidden}
+        th,td{padding:12px 14px;border-bottom:1px solid #e2e8f0;text-align:${
+          isArabic ? "right" : "left"
+        };vertical-align:top;font-size:13px}
+        th{background:#f8fafc;color:#475569;font-size:11px;letter-spacing:.12em;text-transform:uppercase}
+        @media print { body { padding: 0; } }
+      </style>
+    </head>
+    <body>
+      <div class="hero">
         <div>
-          <h1>${escapeHtml(payload.title)}</h1>
-          <div class="muted">${escapeHtml(
+          <h1 class="title">${escapeHtml(payload.title)}</h1>
+          <div class="sub">${escapeHtml(
             isArabic ? "نسخة قابلة للطباعة" : "Printable report",
           )}</div>
         </div>
-        <div class="muted">${escapeHtml(payload.reviewDate || todayISO())}</div>
+        <div class="sub">${escapeHtml(payload.reviewDate || todayISO())}</div>
       </div>
 
-      <div class="section">
-        <div class="section-title">${escapeHtml(labels.patient)}</div>
+      <section class="section">
+        <h2>${escapeHtml(labels.patient)}</h2>
         <div class="grid">
           ${buildCard(labels.patientName, payload.patientName || labels.empty)}
           ${buildCard(labels.dob, payload.dob || labels.empty)}
           ${buildCard(labels.mrn, payload.mrn || labels.empty)}
           ${buildCard(labels.occupation, payload.occupation || labels.empty)}
-          ${buildCard(
-            labels.supervisingDoctor,
-            payload.supervisingDoctor || labels.empty,
-          )}
+          ${buildCard(labels.supervisingDoctor, payload.supervisingDoctor || labels.empty)}
           ${buildCard(labels.carer, payload.carer || labels.empty)}
           ${buildCard(labels.allergies, payload.allergies || labels.empty)}
-          ${buildCard(
-            labels.intolerances,
-            payload.intolerances || labels.empty,
-          )}
+          ${buildCard(labels.intolerances, payload.intolerances || labels.empty)}
         </div>
-      </div>
+      </section>
 
-      <div class="section">
-        <div class="section-title">${escapeHtml(labels.history)}</div>
+      <section class="section">
+        <h2>${escapeHtml(labels.history)}</h2>
         ${buildCard("", payload.significantHistory || labels.empty)}
-      </div>
+      </section>
 
-      <div class="section">
-        <div class="section-title">${escapeHtml(labels.meds)}</div>
+      <section class="section">
+        <h2>${escapeHtml(labels.meds)}</h2>
         <table>
           <thead>
             <tr>
@@ -472,53 +454,23 @@ function buildPrintHtml(payload: ReportPayload) {
           </thead>
           <tbody>${tableRows}</tbody>
         </table>
-      </div>
+      </section>
 
-      <div class="section">
-        <div class="section-title">${escapeHtml(labels.review)}</div>
+      <section class="section">
+        <h2>${escapeHtml(labels.review)}</h2>
         <div class="grid">
           ${buildCard(labels.reviewDate, payload.reviewDate || labels.empty)}
-          ${buildCard(
-            labels.reviewCompletedBy,
-            payload.reviewCompletedBy || labels.empty,
-          )}
-          ${buildCard(
-            labels.treatmentGoals,
-            payload.treatmentGoals || labels.empty,
-          )}
-          ${buildCard(
-            labels.nextReviewDate,
-            payload.nextReviewDate || labels.empty,
-          )}
-          ${buildCard(
-            labels.nextReviewMode,
-            payload.nextReviewMode || labels.empty,
-          )}
-          ${buildCard(
-            labels.beforeNextReview,
-            payload.beforeNextReview || labels.empty,
-          )}
+          ${buildCard(labels.reviewCompletedBy, payload.reviewCompletedBy || labels.empty)}
+          ${buildCard(labels.treatmentGoals, payload.treatmentGoals || labels.empty)}
+          ${buildCard(labels.nextReviewDate, payload.nextReviewDate || labels.empty)}
+          ${buildCard(labels.nextReviewMode, payload.nextReviewMode || labels.empty)}
+          ${buildCard(labels.beforeNextReview, payload.beforeNextReview || labels.empty)}
           ${buildCard(labels.notes, payload.notes || labels.empty)}
         </div>
-      </div>
-    </div>
-  </body>
-</html>`;
-}
-
-function buildCard(label: string, value: string) {
-  return `<div class="card">${
-    label ? `<div class="label">${escapeHtml(label)}</div>` : ""
-  }<div class="value">${escapeHtml(value)}</div></div>`;
-}
-
-function escapeHtml(value: string) {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
+      </section>
+    </body>
+  </html>
+  `;
 }
 
 function openPrintWindow(html: string) {
@@ -526,7 +478,6 @@ function openPrintWindow(html: string) {
   if (!win) {
     throw new Error("Popup blocked. Allow popups to print the report.");
   }
-
   win.document.open();
   win.document.write(html);
   win.document.close();
@@ -542,39 +493,484 @@ function Field({
   hint,
 }: {
   label: string;
-  children: ReactNode;
+  children?: ReactNode;
   hint?: string;
 }) {
   return (
-    <label className="flex flex-col gap-2">
-      <div>
-        <div className="text-sm font-semibold text-slate-800">{label}</div>
-        {hint ? (
-          <div className="mt-1 text-xs text-slate-500">{hint}</div>
-        ) : null}
-      </div>
+    <div>
+      <label className="field-label">{label}</label>
       {children}
-    </label>
+      {hint ? <div className="field-hint">{hint}</div> : null}
+    </div>
   );
 }
 
 function SummaryTile({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-      <div className="text-xs font-medium uppercase tracking-[0.14em] text-slate-500">
-        {label}
-      </div>
-      <div className="mt-2 whitespace-pre-wrap text-sm font-medium text-slate-900">
+    <div className="metric-card">
+      <div className="metric-label">{label}</div>
+      <div className="mt-1 text-base font-semibold text-[rgb(var(--text))]">
         {value || "—"}
       </div>
     </div>
   );
 }
 
+function TextInput(props: React.InputHTMLAttributes<HTMLInputElement>) {
+  return (
+    <input {...props} className={`field-input ${props.className || ""}`} />
+  );
+}
+
+function TextArea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
+  return (
+    <textarea
+      {...props}
+      className={`field-textarea ${props.className || ""}`}
+    />
+  );
+}
+
+function SelectInput(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
+  return (
+    <select {...props} className={`field-input ${props.className || ""}`} />
+  );
+}
+
+function MedicationDesktopTable({
+  section,
+  systems,
+  system,
+  diagnosisOptions,
+  suggestions,
+  onSectionChange,
+  onRowChange,
+  onAddRow,
+  onDuplicateRow,
+  onDeleteRow,
+  onRemoveSection,
+}: {
+  section: MedicationSection;
+  systems: SystemCatalog[];
+  system?: SystemCatalog;
+  diagnosisOptions: string[];
+  suggestions: SuggestionStore;
+  onSectionChange: (patch: Partial<MedicationSection>) => void;
+  onRowChange: (rowId: string, patch: Partial<MedicationRow>) => void;
+  onAddRow: () => void;
+  onDuplicateRow: (rowId: string) => void;
+  onDeleteRow: (rowId: string) => void;
+  onRemoveSection: () => void;
+}) {
+  return (
+    <div className="table-shell">
+      <div className="border-b border-[rgb(var(--border))] bg-[rgb(var(--surface-alt))] px-4 py-4 sm:px-5">
+        <div className="grid gap-4 xl:grid-cols-[1.1fr_1fr_190px_160px] xl:items-end">
+          <Field label="System">
+            <SelectInput
+              value={section.systemId}
+              onChange={(event) =>
+                onSectionChange({
+                  systemId: event.target.value,
+                  diagnosis:
+                    system?.id === event.target.value ? section.diagnosis : "",
+                })
+              }
+            >
+              <option value="">Select a system</option>
+              {systems.map((entry) => (
+                <option key={entry.id} value={entry.id}>
+                  {entry.name}
+                </option>
+              ))}
+            </SelectInput>
+          </Field>
+
+          <Field label="Diagnosis">
+            <input
+              className="field-input"
+              list={`diag-${section.id}`}
+              value={section.diagnosis}
+              onChange={(event) =>
+                onSectionChange({ diagnosis: event.target.value })
+              }
+              placeholder={
+                section.systemId
+                  ? "Select or type diagnosis"
+                  : "Pick system first"
+              }
+              disabled={!section.systemId}
+            />
+            <datalist id={`diag-${section.id}`}>
+              {diagnosisOptions.map((diagnosis) => (
+                <option key={diagnosis} value={diagnosis} />
+              ))}
+            </datalist>
+          </Field>
+
+          <Field label="Diagnosis date if available">
+            <TextInput
+              type="date"
+              value={toInputDate(section.diagnosisDate)}
+              onChange={(event) =>
+                onSectionChange({
+                  diagnosisDate: fromInputDate(event.target.value),
+                })
+              }
+            />
+          </Field>
+
+          <div className="flex flex-wrap gap-2 xl:justify-end">
+            <button type="button" className="btn-primary" onClick={onAddRow}>
+              Add medication row
+            </button>
+            <button
+              type="button"
+              className="btn-danger"
+              onClick={onRemoveSection}
+            >
+              Remove system
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="table-scroll">
+        <table className="med-table">
+          <thead>
+            <tr>
+              <th className="sticky-first-col">Medication</th>
+              <th>Dose</th>
+              <th>How to take</th>
+              <th>Used for</th>
+              <th>Agreed plan / next review</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {section.rows.map((row) => (
+              <tr key={row.id}>
+                <td className="sticky-first-col w-[220px]">
+                  <input
+                    className="field-input"
+                    list={`med-${row.id}`}
+                    value={row.medication}
+                    onChange={(event) =>
+                      onRowChange(row.id, { medication: event.target.value })
+                    }
+                    placeholder="Medication"
+                  />
+                  <datalist id={`med-${row.id}`}>
+                    {suggestions.medications.map((item) => (
+                      <option key={item} value={item} />
+                    ))}
+                  </datalist>
+                </td>
+                <td className="w-[170px]">
+                  <input
+                    className="field-input"
+                    list={`dose-${row.id}`}
+                    value={row.dose}
+                    onChange={(event) =>
+                      onRowChange(row.id, { dose: event.target.value })
+                    }
+                    placeholder="Dose"
+                  />
+                  <datalist id={`dose-${row.id}`}>
+                    {suggestions.doses.map((item) => (
+                      <option key={item} value={item} />
+                    ))}
+                  </datalist>
+                </td>
+                <td className="w-[260px]">
+                  <input
+                    className="field-input"
+                    list={`how-${row.id}`}
+                    value={row.how}
+                    onChange={(event) =>
+                      onRowChange(row.id, { how: event.target.value })
+                    }
+                    placeholder="How to take"
+                  />
+                  <datalist id={`how-${row.id}`}>
+                    {suggestions.how.map((item) => (
+                      <option key={item} value={item} />
+                    ))}
+                  </datalist>
+                </td>
+                <td className="w-[220px]">
+                  <input
+                    className="field-input"
+                    list={`purpose-${row.id}`}
+                    value={row.purpose}
+                    onChange={(event) =>
+                      onRowChange(row.id, { purpose: event.target.value })
+                    }
+                    placeholder="Used for"
+                  />
+                  <datalist id={`purpose-${row.id}`}>
+                    {suggestions.purposes.map((item) => (
+                      <option key={item} value={item} />
+                    ))}
+                  </datalist>
+                </td>
+                <td className="w-[240px]">
+                  <input
+                    className="field-input"
+                    list={`plan-${row.id}`}
+                    value={row.plan}
+                    onChange={(event) =>
+                      onRowChange(row.id, { plan: event.target.value })
+                    }
+                    placeholder="Agreed plan / next review"
+                  />
+                  <datalist id={`plan-${row.id}`}>
+                    {suggestions.plans.map((item) => (
+                      <option key={item} value={item} />
+                    ))}
+                  </datalist>
+                </td>
+                <td className="w-[168px]">
+                  <div className="flex flex-col gap-2">
+                    <button
+                      type="button"
+                      className="btn-secondary !px-3 !py-2 text-xs"
+                      onClick={() => onDuplicateRow(row.id)}
+                    >
+                      Duplicate
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-danger !px-3 !py-2 text-xs"
+                      onClick={() => onDeleteRow(row.id)}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function MedicationMobileCards({
+  section,
+  systems,
+  systemName,
+  diagnosisOptions,
+  suggestions,
+  onSectionChange,
+  onRowChange,
+  onAddRow,
+  onDuplicateRow,
+  onDeleteRow,
+  onRemoveSection,
+}: {
+  section: MedicationSection;
+  systems: SystemCatalog[];
+  systemName: string;
+  diagnosisOptions: string[];
+  suggestions: SuggestionStore;
+  onSectionChange: (patch: Partial<MedicationSection>) => void;
+  onRowChange: (rowId: string, patch: Partial<MedicationRow>) => void;
+  onAddRow: () => void;
+  onDuplicateRow: (rowId: string) => void;
+  onDeleteRow: (rowId: string) => void;
+  onRemoveSection: () => void;
+}) {
+  return (
+    <div className="space-y-4">
+      <div className="section-card">
+        <div className="grid gap-4">
+          <Field label="System">
+            <SelectInput
+              value={section.systemId}
+              onChange={(event) =>
+                onSectionChange({
+                  systemId: event.target.value,
+                  diagnosis:
+                    systems.find((item) => item.id === event.target.value)
+                      ?.id === section.systemId
+                      ? section.diagnosis
+                      : "",
+                })
+              }
+            >
+              <option value="">Select a system</option>
+              {systems.map((entry) => (
+                <option key={entry.id} value={entry.id}>
+                  {entry.name}
+                </option>
+              ))}
+            </SelectInput>
+          </Field>
+          <Field label="Diagnosis">
+            <input
+              className="field-input"
+              list={`diag-mobile-${section.id}`}
+              value={section.diagnosis}
+              onChange={(event) =>
+                onSectionChange({ diagnosis: event.target.value })
+              }
+              placeholder="Select or type diagnosis"
+            />
+            <datalist id={`diag-mobile-${section.id}`}>
+              {diagnosisOptions.map((diagnosis) => (
+                <option key={diagnosis} value={diagnosis} />
+              ))}
+            </datalist>
+          </Field>
+          <Field label="Diagnosis date if available">
+            <TextInput
+              type="date"
+              value={toInputDate(section.diagnosisDate)}
+              onChange={(event) =>
+                onSectionChange({
+                  diagnosisDate: fromInputDate(event.target.value),
+                })
+              }
+            />
+          </Field>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" className="btn-primary" onClick={onAddRow}>
+              Add row
+            </button>
+            <button
+              type="button"
+              className="btn-danger"
+              onClick={onRemoveSection}
+            >
+              Remove system
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {section.rows.map((row, index) => (
+        <div key={row.id} className="med-card">
+          <div className="mb-4 flex items-start justify-between gap-3">
+            <div>
+              <div className="kicker">Medication row {index + 1}</div>
+              <div className="mt-1 text-sm text-[rgb(var(--muted))]">
+                Same data, less table punishment.
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                className="btn-secondary !px-3 !py-2 text-xs"
+                onClick={() => onDuplicateRow(row.id)}
+              >
+                Duplicate
+              </button>
+              <button
+                type="button"
+                className="btn-danger !px-3 !py-2 text-xs"
+                onClick={() => onDeleteRow(row.id)}
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+
+          <div className="grid gap-3">
+            <Field label="Medication">
+              <input
+                className="field-input"
+                list={`med-mobile-${row.id}`}
+                value={row.medication}
+                onChange={(event) =>
+                  onRowChange(row.id, { medication: event.target.value })
+                }
+                placeholder="Medication"
+              />
+              <datalist id={`med-mobile-${row.id}`}>
+                {suggestions.medications.map((item) => (
+                  <option key={item} value={item} />
+                ))}
+              </datalist>
+            </Field>
+
+            <Field label="Dose">
+              <input
+                className="field-input"
+                list={`dose-mobile-${row.id}`}
+                value={row.dose}
+                onChange={(event) =>
+                  onRowChange(row.id, { dose: event.target.value })
+                }
+                placeholder="Dose"
+              />
+              <datalist id={`dose-mobile-${row.id}`}>
+                {suggestions.doses.map((item) => (
+                  <option key={item} value={item} />
+                ))}
+              </datalist>
+            </Field>
+
+            <Field label="How to take">
+              <input
+                className="field-input"
+                list={`how-mobile-${row.id}`}
+                value={row.how}
+                onChange={(event) =>
+                  onRowChange(row.id, { how: event.target.value })
+                }
+                placeholder="How to take"
+              />
+              <datalist id={`how-mobile-${row.id}`}>
+                {suggestions.how.map((item) => (
+                  <option key={item} value={item} />
+                ))}
+              </datalist>
+            </Field>
+
+            <Field label="Used for">
+              <input
+                className="field-input"
+                list={`purpose-mobile-${row.id}`}
+                value={row.purpose}
+                onChange={(event) =>
+                  onRowChange(row.id, { purpose: event.target.value })
+                }
+                placeholder="Used for"
+              />
+              <datalist id={`purpose-mobile-${row.id}`}>
+                {suggestions.purposes.map((item) => (
+                  <option key={item} value={item} />
+                ))}
+              </datalist>
+            </Field>
+
+            <Field label="Agreed plan / next review">
+              <input
+                className="field-input"
+                list={`plan-mobile-${row.id}`}
+                value={row.plan}
+                onChange={(event) =>
+                  onRowChange(row.id, { plan: event.target.value })
+                }
+                placeholder="Agreed plan / next review"
+              />
+              <datalist id={`plan-mobile-${row.id}`}>
+                {suggestions.plans.map((item) => (
+                  <option key={item} value={item} />
+                ))}
+              </datalist>
+            </Field>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function Page() {
-  const [tab, setTab] = useState<TabKey>("patient");
-  const [systems, setSystems] = useState<SystemCatalog[]>([]);
-  const [systemsLoaded, setSystemsLoaded] = useState(false);
+  const [activeTab, setActiveTab] = useState<TabKey>("patient");
 
   const [patientName, setPatientName] = useState("");
   const [dob, setDob] = useState("");
@@ -584,7 +980,9 @@ export default function Page() {
   const [carer, setCarer] = useState("");
   const [allergies, setAllergies] = useState("");
   const [intolerances, setIntolerances] = useState("");
+
   const [significantHistory, setSignificantHistory] = useState("");
+
   const [reviewDate, setReviewDate] = useState(todayISO());
   const [reviewCompletedBy, setReviewCompletedBy] = useState("");
   const [treatmentGoals, setTreatmentGoals] = useState("");
@@ -594,35 +992,95 @@ export default function Page() {
   >("");
   const [beforeNextReview, setBeforeNextReview] = useState("");
   const [notes, setNotes] = useState("");
-  const [aiSuggestion, setAiSuggestion] = useState("");
 
-  const [sections, setSections] = useState<MedicationSection[]>([]);
+  const [systems, setSystems] = useState<SystemCatalog[]>([]);
+  const [systemsLoaded, setSystemsLoaded] = useState(false);
+  const [sections, setSections] = useState<MedicationSection[]>([
+    createSection(),
+  ]);
   const [addSystemId, setAddSystemId] = useState("");
+
   const [search, setSearch] = useState("");
   const [incompleteOnly, setIncompleteOnly] = useState(false);
-
+  const [compactMode, setCompactMode] = useState(false);
   const [online, setOnline] = useState(true);
-  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">(
-    "idle",
-  );
+  const [exporting, setExporting] = useState<ExportLanguage | null>(null);
   const [toast, setToast] = useState<ToastState>(null);
-  const [exportOpen, setExportOpen] = useState(false);
-  const [exportBusy, setExportBusy] = useState<ExportLanguage | "">("");
-  const [scribeResetSignal, setScribeResetSignal] = useState(0);
+  const [lastTranscript, setLastTranscript] = useState("");
+  const [lastDraft, setLastDraft] = useState<ScribeDraft | null>(null);
+  const [aiClinicalSupport, setAiClinicalSupport] = useState<AiClinicalSupport>(
+    {
+      summary: "",
+      likelyDiagnosis: "",
+      reasoning: "",
+      medicationOptions: [],
+      nextSteps: [],
+      redFlags: [],
+      confidence: "",
+    },
+  );
 
-  const [suggestions, setSuggestions] = useState<SuggestionState>({
+  const [suggestions, setSuggestions] = useState<SuggestionStore>({
     medications: [],
-    doses: [],
-    how: [],
+    doses: DEFAULT_DOSE_OPTIONS,
+    how: DEFAULT_HOW_OPTIONS,
     purposes: [],
-    plans: [],
+    plans: DEFAULT_PLAN_OPTIONS,
   });
 
-  const toastTimer = useRef<number | null>(null);
+  const systemById = useMemo(
+    () => new Map(systems.map((system) => [system.id, system] as const)),
+    [systems],
+  );
+
+  const filteredSections = useMemo(() => {
+    const query = normalize(search);
+    if (!query && !incompleteOnly) return sections;
+
+    return sections
+      .map((section) => {
+        const rows = section.rows.filter((row) => {
+          const haystack = [
+            systemById.get(section.systemId)?.name || "",
+            section.diagnosis,
+            row.medication,
+            row.dose,
+            row.how,
+            row.purpose,
+            row.plan,
+          ]
+            .join(" ")
+            .toLowerCase();
+
+          const matchesSearch = !query || haystack.includes(query);
+          const isIncomplete =
+            !section.systemId ||
+            !section.diagnosis ||
+            !row.medication ||
+            !row.dose ||
+            !row.how;
+
+          return matchesSearch && (!incompleteOnly || isIncomplete);
+        });
+
+        return { ...section, rows };
+      })
+      .filter((section) => section.rows.length > 0);
+  }, [incompleteOnly, search, sections, systemById]);
+
+  const completeRowCount = useMemo(
+    () =>
+      sections
+        .flatMap((section) => section.rows)
+        .filter((row) => {
+          return row.medication && row.dose && row.how;
+        }).length,
+    [sections],
+  );
 
   useEffect(() => {
     fetch("/systems.json")
-      .then((res) => res.json())
+      .then((response) => response.json())
       .then((data) => {
         setSystems(Array.isArray(data) ? data : []);
       })
@@ -631,13 +1089,13 @@ export default function Page() {
 
   useEffect(() => {
     setOnline(typeof navigator !== "undefined" ? navigator.onLine : true);
-    const onUp = () => setOnline(true);
-    const onDown = () => setOnline(false);
-    window.addEventListener("online", onUp);
-    window.addEventListener("offline", onDown);
+    const handleOnline = () => setOnline(true);
+    const handleOffline = () => setOnline(false);
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
     return () => {
-      window.removeEventListener("online", onUp);
-      window.removeEventListener("offline", onDown);
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
     };
   }, []);
 
@@ -645,64 +1103,144 @@ export default function Page() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (!raw) return;
-      const parsed = JSON.parse(raw) as Record<string, unknown>;
-
-      setPatientName(String(parsed.patientName ?? ""));
-      setDob(String(parsed.dob ?? ""));
-      setMrn(String(parsed.mrn ?? ""));
-      setOccupation(String(parsed.occupation ?? ""));
-      setSupervisingDoctor(String(parsed.supervisingDoctor ?? ""));
-      setCarer(String(parsed.carer ?? ""));
-      setAllergies(String(parsed.allergies ?? ""));
-      setIntolerances(String(parsed.intolerances ?? ""));
-      setSignificantHistory(String(parsed.significantHistory ?? ""));
-      setReviewDate(String(parsed.reviewDate ?? todayISO()));
-      setReviewCompletedBy(String(parsed.reviewCompletedBy ?? ""));
-      setTreatmentGoals(String(parsed.treatmentGoals ?? ""));
-      setNextReviewDate(String(parsed.nextReviewDate ?? ""));
-      setNextReviewMode(
-        parsed.nextReviewMode === "In-person" ||
-          parsed.nextReviewMode === "Video"
-          ? parsed.nextReviewMode
+      const saved = JSON.parse(raw) as Record<string, unknown>;
+      setPatientName(
+        typeof saved.patientName === "string" ? saved.patientName : "",
+      );
+      setDob(typeof saved.dob === "string" ? saved.dob : "");
+      setMrn(typeof saved.mrn === "string" ? saved.mrn : "");
+      setOccupation(
+        typeof saved.occupation === "string" ? saved.occupation : "",
+      );
+      setSupervisingDoctor(
+        typeof saved.supervisingDoctor === "string"
+          ? saved.supervisingDoctor
           : "",
       );
-      setBeforeNextReview(String(parsed.beforeNextReview ?? ""));
-      setNotes(String(parsed.notes ?? ""));
-      setAiSuggestion(String(parsed.aiSuggestion ?? ""));
-      setAddSystemId(String(parsed.addSystemId ?? ""));
-      setSearch(String(parsed.search ?? ""));
-      setIncompleteOnly(Boolean(parsed.incompleteOnly));
-      setSections(
-        Array.isArray(parsed.sections)
-          ? (parsed.sections as MedicationSection[])
-          : [],
+      setCarer(typeof saved.carer === "string" ? saved.carer : "");
+      setAllergies(typeof saved.allergies === "string" ? saved.allergies : "");
+      setIntolerances(
+        typeof saved.intolerances === "string" ? saved.intolerances : "",
       );
-      const loadedSuggestions = parsed.suggestions;
-      if (loadedSuggestions && typeof loadedSuggestions === "object") {
-        setSuggestions({
-          medications: Array.isArray(
-            (loadedSuggestions as SuggestionState).medications,
-          )
-            ? uniqKeepOrder((loadedSuggestions as SuggestionState).medications)
+      setSignificantHistory(
+        typeof saved.significantHistory === "string"
+          ? saved.significantHistory
+          : "",
+      );
+      setReviewDate(
+        typeof saved.reviewDate === "string" ? saved.reviewDate : todayISO(),
+      );
+      setReviewCompletedBy(
+        typeof saved.reviewCompletedBy === "string"
+          ? saved.reviewCompletedBy
+          : "",
+      );
+      setTreatmentGoals(
+        typeof saved.treatmentGoals === "string" ? saved.treatmentGoals : "",
+      );
+      setNextReviewDate(
+        typeof saved.nextReviewDate === "string" ? saved.nextReviewDate : "",
+      );
+      setNextReviewMode(
+        saved.nextReviewMode === "In-person" || saved.nextReviewMode === "Video"
+          ? saved.nextReviewMode
+          : "",
+      );
+      setBeforeNextReview(
+        typeof saved.beforeNextReview === "string"
+          ? saved.beforeNextReview
+          : "",
+      );
+      setNotes(typeof saved.notes === "string" ? saved.notes : "");
+      setSearch(typeof saved.search === "string" ? saved.search : "");
+      setIncompleteOnly(Boolean(saved.incompleteOnly));
+      setCompactMode(Boolean(saved.compactMode));
+      setAddSystemId(
+        typeof saved.addSystemId === "string" ? saved.addSystemId : "",
+      );
+      if (Array.isArray(saved.sections) && saved.sections.length) {
+        setSections(
+          saved.sections.map((section) => {
+            const record = (section ?? {}) as Record<string, unknown>;
+            return createSection({
+              id: typeof record.id === "string" ? record.id : uid(),
+              systemId:
+                typeof record.systemId === "string" ? record.systemId : "",
+              diagnosis:
+                typeof record.diagnosis === "string" ? record.diagnosis : "",
+              diagnosisDate:
+                typeof record.diagnosisDate === "string"
+                  ? record.diagnosisDate
+                  : "",
+              rows: Array.isArray(record.rows)
+                ? record.rows.map((row) => {
+                    const rowRecord = (row ?? {}) as Record<string, unknown>;
+                    return createMedicationRow({
+                      id:
+                        typeof rowRecord.id === "string" ? rowRecord.id : uid(),
+                      medication:
+                        typeof rowRecord.medication === "string"
+                          ? rowRecord.medication
+                          : "",
+                      dose:
+                        typeof rowRecord.dose === "string"
+                          ? rowRecord.dose
+                          : "",
+                      how:
+                        typeof rowRecord.how === "string" ? rowRecord.how : "",
+                      purpose:
+                        typeof rowRecord.purpose === "string"
+                          ? rowRecord.purpose
+                          : "",
+                      plan:
+                        typeof rowRecord.plan === "string"
+                          ? rowRecord.plan
+                          : "",
+                    });
+                  })
+                : [createMedicationRow()],
+            });
+          }),
+        );
+      }
+      if (
+        saved.aiClinicalSupport &&
+        typeof saved.aiClinicalSupport === "object"
+      ) {
+        const support = saved.aiClinicalSupport as Record<string, unknown>;
+        setAiClinicalSupport({
+          summary: typeof support.summary === "string" ? support.summary : "",
+          likelyDiagnosis:
+            typeof support.likelyDiagnosis === "string"
+              ? support.likelyDiagnosis
+              : "",
+          reasoning:
+            typeof support.reasoning === "string" ? support.reasoning : "",
+          medicationOptions: Array.isArray(support.medicationOptions)
+            ? support.medicationOptions.filter(
+                (item): item is string => typeof item === "string",
+              )
             : [],
-          doses: Array.isArray((loadedSuggestions as SuggestionState).doses)
-            ? uniqKeepOrder((loadedSuggestions as SuggestionState).doses)
+          nextSteps: Array.isArray(support.nextSteps)
+            ? support.nextSteps.filter(
+                (item): item is string => typeof item === "string",
+              )
             : [],
-          how: Array.isArray((loadedSuggestions as SuggestionState).how)
-            ? uniqKeepOrder((loadedSuggestions as SuggestionState).how)
+          redFlags: Array.isArray(support.redFlags)
+            ? support.redFlags.filter(
+                (item): item is string => typeof item === "string",
+              )
             : [],
-          purposes: Array.isArray(
-            (loadedSuggestions as SuggestionState).purposes,
-          )
-            ? uniqKeepOrder((loadedSuggestions as SuggestionState).purposes)
-            : [],
-          plans: Array.isArray((loadedSuggestions as SuggestionState).plans)
-            ? uniqKeepOrder((loadedSuggestions as SuggestionState).plans)
-            : [],
+          confidence:
+            support.confidence === "low" ||
+            support.confidence === "medium" ||
+            support.confidence === "high"
+              ? support.confidence
+              : "",
         });
       }
     } catch {
-      // ignore broken local state
+      // Ignore bad local storage. Humanity stores broken JSON with heroic confidence.
     }
   }, []);
 
@@ -724,201 +1262,53 @@ export default function Page() {
       nextReviewMode,
       beforeNextReview,
       notes,
-      aiSuggestion,
-      addSystemId,
+      sections,
       search,
       incompleteOnly,
-      sections,
-      suggestions,
+      compactMode,
+      addSystemId,
+      aiClinicalSupport,
     };
-
-    setSaveState("saving");
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-      const timer = window.setTimeout(() => setSaveState("saved"), 160);
-      return () => window.clearTimeout(timer);
-    } catch {
-      setSaveState("idle");
-      return undefined;
-    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
   }, [
-    patientName,
-    dob,
-    mrn,
-    occupation,
-    supervisingDoctor,
-    carer,
+    addSystemId,
+    aiClinicalSupport,
     allergies,
+    beforeNextReview,
+    carer,
+    compactMode,
+    dob,
+    incompleteOnly,
     intolerances,
-    significantHistory,
-    reviewDate,
-    reviewCompletedBy,
-    treatmentGoals,
+    mrn,
     nextReviewDate,
     nextReviewMode,
-    beforeNextReview,
     notes,
-    aiSuggestion,
-    addSystemId,
+    occupation,
+    patientName,
+    reviewCompletedBy,
+    reviewDate,
     search,
-    incompleteOnly,
     sections,
-    suggestions,
+    significantHistory,
+    supervisingDoctor,
+    treatmentGoals,
   ]);
 
   useEffect(() => {
     if (!toast) return;
-    if (toastTimer.current) {
-      window.clearTimeout(toastTimer.current);
-    }
-    toastTimer.current = window.setTimeout(() => setToast(null), 2600);
-    return () => {
-      if (toastTimer.current) {
-        window.clearTimeout(toastTimer.current);
-      }
-    };
+    const timer = window.setTimeout(() => setToast(null), 2800);
+    return () => window.clearTimeout(timer);
   }, [toast]);
 
-  const systemById = useMemo(() => {
-    return new Map(systems.map((system) => [system.id, system]));
-  }, [systems]);
-
-  const allMedicationSuggestions = useMemo(
-    () => uniqKeepOrder(suggestions.medications),
-    [suggestions.medications],
-  );
-  const allDoseSuggestions = useMemo(
-    () => uniqKeepOrder([...DEFAULT_DOSE_OPTIONS, ...suggestions.doses]),
-    [suggestions.doses],
-  );
-  const allHowSuggestions = useMemo(
-    () => uniqKeepOrder([...DEFAULT_HOW_OPTIONS, ...suggestions.how]),
-    [suggestions.how],
-  );
-  const allPurposeSuggestions = useMemo(
-    () => uniqKeepOrder(suggestions.purposes),
-    [suggestions.purposes],
-  );
-  const allPlanSuggestions = useMemo(
-    () => uniqKeepOrder([...DEFAULT_PLAN_OPTIONS, ...suggestions.plans]),
-    [suggestions.plans],
-  );
-
-  const filteredSections = useMemo(() => {
-    const q = normalize(search);
-    return sections
-      .map((section) => {
-        const systemName = systemById.get(section.systemId)?.name || "";
-        const rows = section.rows.filter((row) => {
-          const text = [
-            systemName,
-            section.diagnosis,
-            section.diagnosisDate,
-            row.medication,
-            row.dose,
-            row.how,
-            row.purpose,
-            row.plan,
-          ]
-            .join(" ")
-            .toLowerCase();
-
-          const matchesSearch = !q || text.includes(q);
-          const incomplete = [
-            row.medication,
-            row.dose,
-            row.how,
-            row.purpose,
-            row.plan,
-          ].some((value) => !value.trim());
-
-          return matchesSearch && (!incompleteOnly || incomplete);
-        });
-
-        if (q && !rows.length) {
-          const sectionText =
-            `${systemName} ${section.diagnosis} ${section.diagnosisDate}`.toLowerCase();
-          if (!sectionText.includes(q)) {
-            return null;
-          }
-        }
-
-        if (!rows.length && (q || incompleteOnly)) return null;
-
-        return {
-          ...section,
-          rows,
-        };
-      })
-      .filter(Boolean) as MedicationSection[];
-  }, [sections, systemById, search, incompleteOnly]);
-
-  const totalRows = useMemo(
-    () => sections.reduce((sum, section) => sum + section.rows.length, 0),
-    [sections],
-  );
-
-  function showToast(message: string) {
-    setToast({ message });
-  }
-
-  function addSection(systemId: string) {
-    if (!systemId) return;
-    const system = systemById.get(systemId);
-    const next: MedicationSection = {
-      id: `section-${uid()}`,
-      systemId,
-      diagnosis: "",
-      diagnosisDate: "",
-      rows: [
-        {
-          id: `row-${uid()}`,
-          medication: "",
-          dose: "",
-          how: "",
-          purpose: "",
-          plan: "",
-        },
-      ],
-    };
-    setSections((prev) => [...prev, next]);
-    setAddSystemId("");
-    setTab("meds");
-    showToast(`Added ${system?.name || "system"}`);
-  }
-
-  function removeSection(sectionId: string) {
-    setSections((prev) => prev.filter((section) => section.id !== sectionId));
-    showToast("System removed");
+  function pushToast(message: string, tone: ToastState["tone"] = "success") {
+    setToast({ message, tone });
   }
 
   function updateSection(sectionId: string, patch: Partial<MedicationSection>) {
     setSections((prev) =>
       prev.map((section) =>
         section.id === sectionId ? { ...section, ...patch } : section,
-      ),
-    );
-  }
-
-  function addMedicationRow(sectionId: string) {
-    setSections((prev) =>
-      prev.map((section) =>
-        section.id === sectionId
-          ? {
-              ...section,
-              rows: [
-                ...section.rows,
-                {
-                  id: `row-${uid()}`,
-                  medication: "",
-                  dose: "",
-                  how: "",
-                  purpose: "",
-                  plan: "",
-                },
-              ],
-            }
-          : section,
       ),
     );
   }
@@ -930,13 +1320,23 @@ export default function Page() {
   ) {
     setSections((prev) =>
       prev.map((section) =>
-        section.id === sectionId
-          ? {
+        section.id !== sectionId
+          ? section
+          : {
               ...section,
               rows: section.rows.map((row) =>
                 row.id === rowId ? { ...row, ...patch } : row,
               ),
-            }
+            },
+      ),
+    );
+  }
+
+  function addRow(sectionId: string, seed?: Partial<MedicationRow>) {
+    setSections((prev) =>
+      prev.map((section) =>
+        section.id === sectionId
+          ? { ...section, rows: [...section.rows, createMedicationRow(seed)] }
           : section,
       ),
     );
@@ -946,15 +1346,15 @@ export default function Page() {
     setSections((prev) =>
       prev.map((section) => {
         if (section.id !== sectionId) return section;
-        const source = section.rows.find((row) => row.id === rowId);
-        if (!source) return section;
+        const row = section.rows.find((item) => item.id === rowId);
+        if (!row) return section;
         return {
           ...section,
           rows: [
             ...section.rows,
             {
-              ...source,
-              id: `row-${uid()}`,
+              ...row,
+              id: uid(),
             },
           ],
         };
@@ -962,237 +1362,35 @@ export default function Page() {
     );
   }
 
-  function removeRow(sectionId: string, rowId: string) {
+  function deleteRow(sectionId: string, rowId: string) {
     setSections((prev) =>
       prev.map((section) => {
         if (section.id !== sectionId) return section;
-        const nextRows = section.rows.filter((row) => row.id !== rowId);
+        const remaining = section.rows.filter((row) => row.id !== rowId);
         return {
           ...section,
-          rows: nextRows.length
-            ? nextRows
-            : [
-                {
-                  id: `row-${uid()}`,
-                  medication: "",
-                  dose: "",
-                  how: "",
-                  purpose: "",
-                  plan: "",
-                },
-              ],
+          rows: remaining.length ? remaining : [createMedicationRow()],
         };
       }),
     );
   }
 
-  function appendIfEmpty(
-    setter: Dispatch<SetStateAction<string>>,
-    incoming?: string,
-  ) {
-    const next = incoming?.trim();
-    if (!next) return;
-    setter((prev) => prev.trim() || next);
-  }
-
-  function appendText(
-    setter: Dispatch<SetStateAction<string>>,
-    incoming?: string,
-  ) {
-    const next = incoming?.trim();
-    if (!next) return;
-    setter((prev) => (prev.trim() ? `${prev.trim()}\n${next}` : next));
-  }
-
-  function resolveSystemId(systemId?: string, diagnosis?: string) {
-    const direct = (systemId ?? "").trim();
-    if (direct && systemById.has(direct)) return direct;
-
-    const diagnosisNorm = normalize(diagnosis || "");
-    if (!diagnosisNorm) return "";
-
-    const matched = systems.find((system) => {
-      if (normalize(system.name) === diagnosisNorm) return true;
-      return system.diagnoses.some((item) => normalize(item) === diagnosisNorm);
+  function removeSection(sectionId: string) {
+    setSections((prev) => {
+      const remaining = prev.filter((section) => section.id !== sectionId);
+      return remaining.length ? remaining : [createSection()];
     });
-
-    return matched?.id || "";
   }
 
-  function mergeTranscriptSuggestions(draft: ScribeDraft) {
-    const meds = Array.isArray(draft.medications) ? draft.medications : [];
-    setSuggestions((prev) => ({
-      medications: uniqKeepOrder([
-        ...prev.medications,
-        ...meds.map((item) => item.medication || item.rawMedication || ""),
-      ]),
-      doses: uniqKeepOrder([
-        ...prev.doses,
-        ...meds.map((item) => item.dose || ""),
-      ]),
-      how: uniqKeepOrder([...prev.how, ...meds.map((item) => item.how || "")]),
-      purposes: uniqKeepOrder([
-        ...prev.purposes,
-        ...meds.map((item) => item.purpose || ""),
-      ]),
-      plans: uniqKeepOrder([
-        ...prev.plans,
-        ...meds.map((item) => item.plan || ""),
-      ]),
-    }));
+  function addSystemSection(systemId?: string) {
+    setSections((prev) => [
+      ...prev,
+      createSection({ systemId: systemId || "" }),
+    ]);
+    if (systemId) setAddSystemId("");
   }
 
-  function applyScribeDraft(draft: ScribeDraft) {
-    appendIfEmpty(setPatientName, draft.patientName);
-    appendIfEmpty(setMrn, draft.caseNumber);
-    appendIfEmpty(setOccupation, draft.occupation);
-    appendIfEmpty(setSupervisingDoctor, draft.supervisingDoctor);
-    appendIfEmpty(setCarer, draft.carer);
-    appendIfEmpty(setAllergies, draft.allergies);
-    appendIfEmpty(setIntolerances, draft.intolerances);
-    appendIfEmpty(setReviewCompletedBy, draft.reviewCompletedBy);
-    appendIfEmpty(setTreatmentGoals, draft.treatmentGoals);
-    appendIfEmpty(setBeforeNextReview, draft.beforeNextReview);
-    appendIfEmpty(setNotes, draft.notes);
-    appendIfEmpty(setAiSuggestion, draft.aiSuggestion);
-
-    const nextDob = toInputDate(draft.dob || "");
-    if (nextDob) {
-      setDob((prev) => prev || nextDob);
-    }
-
-    const nextReview = toInputDate(draft.nextReviewDate || "");
-    if (nextReview) {
-      setNextReviewDate((prev) => prev || nextReview);
-    }
-
-    if (
-      draft.nextReviewMode === "In-person" ||
-      draft.nextReviewMode === "Video"
-    ) {
-      setNextReviewMode((prev) => prev || draft.nextReviewMode!);
-    }
-
-    appendText(setSignificantHistory, draft.significantHistory);
-
-    const structuredNotes = [
-      draft.chiefComplaint?.trim()
-        ? `Chief complaint: ${draft.chiefComplaint.trim()}`
-        : "",
-      Array.isArray(draft.associatedSymptoms) && draft.associatedSymptoms.length
-        ? `Associated symptoms: ${draft.associatedSymptoms.join(", ")}`
-        : "",
-      draft.examFindings?.trim()
-        ? `Exam findings: ${draft.examFindings.trim()}`
-        : "",
-      draft.labSummary?.trim() ? `Lab summary: ${draft.labSummary.trim()}` : "",
-      draft.imagingSummary?.trim()
-        ? `Imaging summary: ${draft.imagingSummary.trim()}`
-        : "",
-    ].filter(Boolean);
-
-    if (structuredNotes.length) {
-      appendText(setNotes, structuredNotes.join(""));
-    }
-
-    mergeTranscriptSuggestions(draft);
-
-    const medications = Array.isArray(draft.medications)
-      ? draft.medications
-      : [];
-    let addedCount = 0;
-    let skippedCount = 0;
-
-    if (medications.length) {
-      setSections((prev) => {
-        const next = [...prev];
-
-        for (const item of medications) {
-          const medicationName = (
-            item.medication ||
-            item.rawMedication ||
-            ""
-          ).trim();
-          if (!medicationName) {
-            skippedCount += 1;
-            continue;
-          }
-
-          const resolvedSystemId = resolveSystemId(
-            item.systemId,
-            item.diagnosis,
-          );
-          if (!resolvedSystemId) {
-            skippedCount += 1;
-            continue;
-          }
-
-          let section = next.find(
-            (entry) => entry.systemId === resolvedSystemId,
-          );
-          if (!section) {
-            section = {
-              id: `section-${uid()}`,
-              systemId: resolvedSystemId,
-              diagnosis: (item.diagnosis || "").trim(),
-              diagnosisDate: "",
-              rows: [],
-            };
-            next.push(section);
-          }
-
-          section.rows = [
-            ...section.rows,
-            {
-              id: `row-${uid()}`,
-              medication: medicationName,
-              dose: (item.dose || "").trim(),
-              how: (item.how || "").trim(),
-              purpose: (item.purpose || "").trim(),
-              plan: (item.plan || "").trim(),
-            },
-          ];
-
-          if (!section.diagnosis.trim() && item.diagnosis?.trim()) {
-            section.diagnosis = item.diagnosis.trim();
-          }
-
-          addedCount += 1;
-        }
-
-        return next;
-      });
-    }
-
-    const filled = [
-      draft.patientName,
-      draft.caseNumber,
-      draft.occupation,
-      draft.supervisingDoctor,
-      draft.significantHistory,
-      draft.allergies,
-      draft.intolerances,
-      draft.reviewCompletedBy,
-      draft.notes,
-      draft.aiSuggestion,
-      draft.chiefComplaint,
-      draft.examFindings,
-      draft.labSummary,
-      draft.imagingSummary,
-    ].filter((value) => value?.trim()).length;
-
-    showToast(
-      addedCount || filled
-        ? `Applied ${filled} field${filled === 1 ? "" : "s"} and ${addedCount} medication${addedCount === 1 ? "" : "s"}${
-            skippedCount ? ` • skipped ${skippedCount}` : ""
-          }`
-        : "Nothing new was applied from the transcript.",
-    );
-
-    setTab(addedCount > 0 ? "meds" : "patient");
-  }
-
-  function resetDraft() {
+  function resetAll() {
     setPatientName("");
     setDob("");
     setMrn("");
@@ -1209,31 +1407,159 @@ export default function Page() {
     setNextReviewMode("");
     setBeforeNextReview("");
     setNotes("");
-    setAiSuggestion("");
-    setSections([]);
-    setAddSystemId("");
-    setSearch("");
-    setIncompleteOnly(false);
+    setSections([createSection()]);
+    setLastTranscript("");
+    setLastDraft(null);
+    setAiClinicalSupport({
+      summary: "",
+      likelyDiagnosis: "",
+      reasoning: "",
+      medicationOptions: [],
+      nextSteps: [],
+      redFlags: [],
+      confidence: "",
+    });
     setSuggestions({
       medications: [],
-      doses: [],
-      how: [],
+      doses: DEFAULT_DOSE_OPTIONS,
+      how: DEFAULT_HOW_OPTIONS,
       purposes: [],
-      plans: [],
+      plans: DEFAULT_PLAN_OPTIONS,
     });
-    setScribeResetSignal((prev) => prev + 1);
-    try {
-      localStorage.removeItem(STORAGE_KEY);
-    } catch {
-      // ignore
-    }
-    showToast("Draft cleared");
+    pushToast("Form reset.");
   }
 
-  async function handleExport(language: ExportLanguage) {
+  function mergeText(current: string, incoming: string) {
+    return compactText(incoming) || current;
+  }
+
+  function appendMultiline(parts: string[]) {
+    return uniqKeepOrder(parts.filter(Boolean)).join("\n");
+  }
+
+  function applyMedicationDraftRows(medications: ScribeMedication[]) {
+    if (!medications.length) return;
+
+    const grouped = new Map<string, ScribeMedication[]>();
+    for (const medication of medications) {
+      const key = `${medication.systemId || "manual"}__${medication.diagnosis || ""}`;
+      grouped.set(key, [...(grouped.get(key) || []), medication]);
+    }
+
+    const nextSections: MedicationSection[] = [];
+    for (const [, items] of grouped.entries()) {
+      const first = items[0];
+      nextSections.push(
+        createSection({
+          systemId: first.systemId,
+          diagnosis: first.diagnosis,
+          rows: items.map((item) =>
+            createMedicationRow({
+              medication: item.medication || item.rawMedication,
+              dose: item.dose,
+              how: item.how,
+              purpose: item.purpose,
+              plan: item.plan,
+            }),
+          ),
+        }),
+      );
+    }
+
+    if (nextSections.length) {
+      setSections(nextSections);
+    }
+  }
+
+  function mergeSuggestionBuckets(draft: ScribeDraft) {
+    const medicationSuggestions = uniqKeepOrder([
+      ...suggestions.medications,
+      ...draft.medications.map((item) => item.medication || item.rawMedication),
+    ]);
+
+    const doseSuggestions = uniqKeepOrder([
+      ...suggestions.doses,
+      ...draft.medications.map((item) => item.dose),
+    ]);
+
+    const howSuggestions = uniqKeepOrder([
+      ...suggestions.how,
+      ...draft.medications.map((item) => item.how),
+    ]);
+
+    const purposeSuggestions = uniqKeepOrder([
+      ...suggestions.purposes,
+      ...draft.medications.map((item) => item.purpose),
+    ]);
+
+    const planSuggestions = uniqKeepOrder([
+      ...suggestions.plans,
+      ...draft.medications.map((item) => item.plan),
+      draft.beforeNextReview,
+    ]);
+
+    setSuggestions({
+      medications: medicationSuggestions,
+      doses: doseSuggestions,
+      how: howSuggestions,
+      purposes: purposeSuggestions,
+      plans: planSuggestions,
+    });
+  }
+
+  function applyDraft(draft: ScribeDraft) {
+    setLastDraft(draft);
+    setLastTranscript(draft.transcript);
+
+    setPatientName((current) => mergeText(current, draft.patientName));
+    setMrn((current) => mergeText(current, draft.caseNumber));
+    setDob((current) => mergeText(current, draft.dob));
+    setOccupation((current) => mergeText(current, draft.occupation));
+    setSupervisingDoctor((current) =>
+      mergeText(current, draft.supervisingDoctor),
+    );
+    setCarer((current) => mergeText(current, draft.carer));
+    setAllergies((current) => mergeText(current, draft.allergies));
+    setIntolerances((current) => mergeText(current, draft.intolerances));
+    setSignificantHistory((current) =>
+      mergeText(current, draft.significantHistory),
+    );
+    setReviewCompletedBy((current) =>
+      mergeText(current, draft.reviewCompletedBy),
+    );
+    setTreatmentGoals((current) => mergeText(current, draft.treatmentGoals));
+    setNextReviewDate((current) => mergeText(current, draft.nextReviewDate));
+    setNextReviewMode((current) => draft.nextReviewMode || current);
+    setBeforeNextReview((current) =>
+      mergeText(current, draft.beforeNextReview),
+    );
+    setAiClinicalSupport(draft.aiClinicalSupport || aiClinicalSupport);
+
+    const structuredNotes = [
+      draft.notes,
+      draft.chiefComplaint ? `Chief complaint: ${draft.chiefComplaint}` : "",
+      draft.associatedSymptoms.length
+        ? `Associated symptoms: ${draft.associatedSymptoms.join(", ")}`
+        : "",
+      draft.examFindings ? `Exam findings: ${draft.examFindings}` : "",
+      draft.labSummary ? `Lab summary: ${draft.labSummary}` : "",
+      draft.imagingSummary ? `Imaging summary: ${draft.imagingSummary}` : "",
+    ].filter(Boolean);
+
+    if (structuredNotes.length) {
+      setNotes((current) => appendMultiline([current, ...structuredNotes]));
+    }
+
+    applyMedicationDraftRows(draft.medications);
+    mergeSuggestionBuckets(draft);
+    pushToast("Draft applied to the form.");
+  }
+
+  async function exportPdf(language: ExportLanguage) {
+    setExporting(language);
+
     try {
-      setExportBusy(language);
-      const payload = buildReportPayload({
+      const basePayload = buildReportPayload({
         language,
         patientName,
         dob,
@@ -1255,1062 +1581,641 @@ export default function Page() {
         systemById,
       });
 
+      let finalPayload = basePayload;
+
       if (language === "ar") {
         const res = await fetch("/api/report/translate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
+          body: JSON.stringify(basePayload),
         });
-        const data = await res.json();
-        if (!res.ok) {
-          throw new Error(data?.error || "Arabic export failed.");
+
+        const data = (await res.json()) as {
+          report?: ReportPayload;
+          error?: string;
+        };
+        if (!res.ok || !data.report) {
+          throw new Error(data.error || "Arabic translation failed.");
         }
-        openPrintWindow(buildPrintHtml(data.report as ReportPayload));
-      } else {
-        openPrintWindow(buildPrintHtml(payload));
+
+        finalPayload = data.report;
       }
 
-      setExportOpen(false);
+      openPrintWindow(buildPrintHtml(finalPayload));
+      pushToast(
+        language === "ar"
+          ? "Arabic PDF opened for printing."
+          : "English PDF opened for printing.",
+      );
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Export failed");
+      pushToast(
+        error instanceof Error ? error.message : "Export failed.",
+        "error",
+      );
     } finally {
-      setExportBusy("");
+      setExporting(null);
     }
   }
 
-  const previewPayload = useMemo(
-    () =>
-      buildReportPayload({
-        language: "en",
-        patientName,
-        dob,
-        mrn,
-        occupation,
-        supervisingDoctor,
-        carer,
-        allergies,
-        intolerances,
-        significantHistory,
-        reviewDate,
-        reviewCompletedBy,
-        treatmentGoals,
-        nextReviewDate,
-        nextReviewMode,
-        beforeNextReview,
-        notes,
-        sections,
-        systemById,
-      }),
-    [
-      patientName,
-      dob,
-      mrn,
-      occupation,
-      supervisingDoctor,
-      carer,
-      allergies,
-      intolerances,
-      significantHistory,
-      reviewDate,
-      reviewCompletedBy,
-      treatmentGoals,
-      nextReviewDate,
-      nextReviewMode,
-      beforeNextReview,
-      notes,
-      sections,
-      systemById,
-    ],
-  );
+  const headerStats = useMemo(() => {
+    const totalRows = sections.reduce(
+      (sum, section) => sum + section.rows.length,
+      0,
+    );
+    return {
+      systems: sections.length,
+      rows: totalRows,
+      completedRows: completeRowCount,
+      pendingRows: Math.max(totalRows - completeRowCount, 0),
+    };
+  }, [completeRowCount, sections]);
 
   return (
-    <div className="min-h-screen bg-slate-100 text-slate-900">
-      <main className="mx-auto flex w-full max-w-7xl flex-col gap-6 px-4 py-5 md:px-6 xl:px-8">
-        <section className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm md:p-6">
-          <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
-            <div className="space-y-3">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
-                  Clinical workflow
-                </span>
-                <span
-                  className={[
-                    "inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold",
-                    online
-                      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                      : "border-amber-200 bg-amber-50 text-amber-700",
-                  ].join(" ")}
-                >
-                  {online ? "Online" : "Offline"}
-                </span>
-                <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-semibold text-slate-600">
-                  {saveState === "saving"
-                    ? "Saving"
-                    : saveState === "saved"
-                      ? "Saved"
-                      : "Draft"}
-                </span>
-              </div>
+    <main className="shell space-y-6">
+      <header className="glass-card print-card overflow-hidden">
+        <div className="flex flex-col gap-6 px-5 py-6 sm:px-6 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <div className="kicker">Clinic workflow</div>
+            <h1 className="hero-title mt-2">
+              Clinical medication review workspace
+            </h1>
+            <p className="hero-subtitle mt-3">
+              Structured patient details, system-based medications, internal AI
+              clinical support, and printable English or Arabic reports.
+              Finally, something in this project is trying to behave like a real
+              product.
+            </p>
+          </div>
 
-              <div>
-                <h1 className="text-3xl font-semibold tracking-tight text-slate-950 md:text-4xl">
-                  Clinical Medication Review
-                </h1>
-                <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600 md:text-base">
-                  Cleaner intake, editable transcript import, diagnosis-based
-                  medication workflow, and printable PDF export in English or
-                  Arabic. Humanity finally reinvented a form without making it
-                  worse. Mostly.
-                </p>
-              </div>
+          <div className="grid w-full gap-3 sm:grid-cols-2 lg:w-[420px] lg:grid-cols-2">
+            <SummaryTile label="Systems" value={String(headerStats.systems)} />
+            <SummaryTile
+              label="Medication rows"
+              value={String(headerStats.rows)}
+            />
+            <SummaryTile
+              label="Complete rows"
+              value={String(headerStats.completedRows)}
+            />
+            <SummaryTile
+              label="Pending rows"
+              value={String(headerStats.pendingRows)}
+            />
+          </div>
+        </div>
+
+        <div className="border-t border-[rgb(var(--border))] px-5 py-4 sm:px-6">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className={`status-pill ${online ? "status-online" : "status-offline"}`}
+              >
+                <span className="h-2 w-2 rounded-full bg-current" />
+                {online ? "Online" : "Offline"}
+              </span>
+              {lastTranscript ? (
+                <span className="chip">
+                  Last transcript: {lastTranscript.slice(0, 78)}
+                  {lastTranscript.length > 78 ? "..." : ""}
+                </span>
+              ) : null}
             </div>
 
-            <div className="grid w-full gap-2 sm:grid-cols-2 lg:w-[360px]">
+            <div className="flex flex-wrap items-center gap-2 no-print">
               <button
                 type="button"
-                onClick={() => setExportOpen(true)}
-                className="rounded-2xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-blue-700"
+                className="btn-secondary"
+                onClick={() => exportPdf("en")}
+                disabled={!!exporting}
               >
-                Download PDF
+                {exporting === "en"
+                  ? "Preparing English PDF..."
+                  : "Download PDF (EN)"}
               </button>
               <button
                 type="button"
-                onClick={resetDraft}
-                className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-900 transition hover:bg-slate-50"
+                className="btn-secondary"
+                onClick={() => exportPdf("ar")}
+                disabled={!!exporting}
               >
-                Reset draft
+                {exporting === "ar"
+                  ? "Preparing Arabic PDF..."
+                  : "Download PDF (AR)"}
               </button>
-              <button
-                type="button"
-                onClick={() => setTab("patient")}
-                className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-900 transition hover:bg-slate-50"
-              >
-                Patient details
-              </button>
-              <button
-                type="button"
-                onClick={() => setTab("meds")}
-                className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-900 transition hover:bg-slate-50"
-              >
-                Medications
-              </button>
-              <button
-                type="button"
-                onClick={() => setTab("review")}
-                className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-900 transition hover:bg-slate-50 sm:col-span-2"
-              >
-                Review & preview
+              <button type="button" className="btn-danger" onClick={resetAll}>
+                Reset form
               </button>
             </div>
           </div>
-        </section>
+        </div>
+      </header>
 
-        <VoiceScribe
-          onApply={applyScribeDraft}
-          resetSignal={scribeResetSignal}
-        />
+      <div className="no-print">
+        <VoiceScribe onApplyDraft={applyDraft} />
+      </div>
 
-        <section className="grid gap-4 md:grid-cols-3 xl:grid-cols-6">
-          <SummaryTile label="Patient" value={englishFallback(patientName)} />
-          <SummaryTile label="MRN" value={englishFallback(mrn)} />
-          <SummaryTile label="Occupation" value={englishFallback(occupation)} />
-          <SummaryTile
-            label="Supervising doctor"
-            value={englishFallback(supervisingDoctor)}
-          />
-          <SummaryTile label="Systems" value={String(sections.length)} />
-          <SummaryTile label="Medications" value={String(totalRows)} />
-        </section>
+      <section className="section-card">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <div className="kicker">Form workspace</div>
+            <h2 className="mt-2 text-xl font-bold">
+              Editable clinical review form
+            </h2>
+          </div>
 
-        {tab === "patient" && (
-          <section className="grid gap-4 xl:grid-cols-[1.3fr_1fr]">
-            <div className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
-              <div className="mb-5">
-                <h2 className="text-xl font-semibold text-slate-950">
-                  Patient details
-                </h2>
-                <p className="mt-1 text-sm text-slate-500">
+          <div className="flex flex-wrap items-center gap-2 no-print">
+            {(["patient", "medications", "review"] as TabKey[]).map((tab) => (
+              <button
+                key={tab}
+                type="button"
+                className={`tab-button ${activeTab === tab ? "tab-button-active" : "tab-button-idle"}`}
+                onClick={() => setActiveTab(tab)}
+              >
+                {tab === "patient"
+                  ? "Patient details"
+                  : tab === "medications"
+                    ? "Medications"
+                    : "Review"}
+              </button>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {(activeTab === "patient" ||
+        activeTab === "medications" ||
+        activeTab === "review") && (
+        <>
+          {activeTab === "patient" ? (
+            <section className="section-card print-card space-y-6">
+              <div>
+                <h3 className="text-2xl font-bold">Patient details</h3>
+                <p className="mt-2 text-sm text-[rgb(var(--muted))]">
                   Everything stays editable, whether it came from dictation or
                   manual entry.
                 </p>
               </div>
 
-              <div className="grid gap-4 md:grid-cols-2">
+              <div className="grid gap-5 md:grid-cols-2">
                 <Field
                   label="Patient name"
                   hint="Transcript tries to convert Arabic names into English spelling."
                 >
-                  <input
+                  <TextInput
                     value={patientName}
-                    onChange={(e) => setPatientName(e.target.value)}
-                    className="field"
-                    placeholder="Full name"
+                    onChange={(event) => setPatientName(event.target.value)}
+                    placeholder="Patient name"
                   />
                 </Field>
-
                 <Field label="MRN / case number">
-                  <input
+                  <TextInput
                     value={mrn}
-                    onChange={(e) => setMrn(e.target.value)}
-                    className="field"
-                    placeholder="Medical record number"
+                    onChange={(event) => setMrn(event.target.value)}
+                    placeholder="MRN / case number"
                   />
                 </Field>
-
                 <Field label="Date of birth">
-                  <input
+                  <TextInput
                     type="date"
-                    value={dob}
-                    onChange={(e) => setDob(e.target.value)}
-                    className="field"
+                    value={toInputDate(dob)}
+                    onChange={(event) =>
+                      setDob(fromInputDate(event.target.value))
+                    }
                   />
                 </Field>
-
                 <Field label="Occupation">
-                  <input
+                  <TextInput
                     value={occupation}
-                    onChange={(e) => setOccupation(e.target.value)}
-                    className="field"
-                    placeholder="Patient occupation"
+                    onChange={(event) => setOccupation(event.target.value)}
+                    placeholder="Occupation"
                   />
                 </Field>
-
                 <Field label="Supervising doctor">
-                  <input
+                  <TextInput
                     value={supervisingDoctor}
-                    onChange={(e) => setSupervisingDoctor(e.target.value)}
-                    className="field"
-                    placeholder="Consultant or supervising physician"
+                    onChange={(event) =>
+                      setSupervisingDoctor(event.target.value)
+                    }
+                    placeholder="Supervising doctor"
                   />
                 </Field>
-
                 <Field label="Carer / representative">
-                  <input
+                  <TextInput
                     value={carer}
-                    onChange={(e) => setCarer(e.target.value)}
-                    className="field"
+                    onChange={(event) => setCarer(event.target.value)}
                     placeholder="Optional"
                   />
                 </Field>
-
                 <Field label="Allergies">
-                  <textarea
+                  <TextArea
                     value={allergies}
-                    onChange={(e) => setAllergies(e.target.value)}
-                    className="field min-h-[110px]"
+                    onChange={(event) => setAllergies(event.target.value)}
                     placeholder="List known allergies"
+                    rows={4}
                   />
                 </Field>
-
                 <Field label="Intolerances">
-                  <textarea
+                  <TextArea
                     value={intolerances}
-                    onChange={(e) => setIntolerances(e.target.value)}
-                    className="field min-h-[110px]"
+                    onChange={(event) => setIntolerances(event.target.value)}
                     placeholder="List known intolerances"
+                    rows={4}
                   />
                 </Field>
               </div>
-            </div>
 
-            <div className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
-              <div className="mb-5">
-                <h2 className="text-xl font-semibold text-slate-950">
-                  History
-                </h2>
-                <p className="mt-1 text-sm text-slate-500">
-                  Free-text history stays clinician-editable and prints exactly
-                  as entered.
-                </p>
-              </div>
-              <Field label="Significant history">
-                <textarea
-                  value={significantHistory}
-                  onChange={(e) => setSignificantHistory(e.target.value)}
-                  className="field min-h-[320px]"
-                  placeholder="Relevant background, chronic conditions, prior issues..."
-                />
-              </Field>
-            </div>
-          </section>
-        )}
-
-        {tab === "meds" && (
-          <section className="grid gap-4 xl:grid-cols-[320px_1fr]">
-            <aside className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
-              <div className="mb-5">
-                <h2 className="text-xl font-semibold text-slate-950">
-                  Medication builder
-                </h2>
-                <p className="mt-1 text-sm text-slate-500">
-                  Pick a system, then choose a diagnosis and fill medication
-                  rows without drama.
-                </p>
-              </div>
-
-              <div className="space-y-4">
-                <Field label="Add system">
-                  <div className="flex gap-2">
-                    <select
-                      value={addSystemId}
-                      onChange={(e) => setAddSystemId(e.target.value)}
-                      className="field"
-                    >
-                      <option value="">Select system</option>
-                      {systems.map((system) => (
-                        <option key={system.id} value={system.id}>
-                          {system.name}
-                        </option>
-                      ))}
-                    </select>
-                    <button
-                      type="button"
-                      onClick={() => addSection(addSystemId)}
-                      className="rounded-2xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-blue-700"
-                    >
-                      Add
-                    </button>
-                  </div>
-                </Field>
-
-                <Field label="Search within medications">
-                  <input
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                    className="field"
-                    placeholder="Search medication, diagnosis, plan..."
+              <div className="grid gap-5 lg:grid-cols-[1fr_0.95fr]">
+                <div>
+                  <label className="field-label">Significant history</label>
+                  <TextArea
+                    value={significantHistory}
+                    onChange={(event) =>
+                      setSignificantHistory(event.target.value)
+                    }
+                    placeholder="Free-text history stays clinician-editable and prints exactly as entered."
+                    rows={7}
                   />
-                </Field>
-
-                <label className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700">
-                  <input
-                    type="checkbox"
-                    checked={incompleteOnly}
-                    onChange={(e) => setIncompleteOnly(e.target.checked)}
-                    className="h-4 w-4 rounded border-slate-300 text-blue-600"
-                  />
-                  Show incomplete rows only
-                </label>
-              </div>
-
-              <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
-                {systemsLoaded ? (
-                  <>
-                    <div className="font-semibold text-slate-900">
-                      {sections.length} systems
-                    </div>
-                    <div className="mt-1">
-                      {totalRows} medication rows in this draft.
-                    </div>
-                  </>
-                ) : (
-                  "Loading systems..."
-                )}
-              </div>
-            </aside>
-
-            <div className="space-y-4">
-              {filteredSections.length === 0 ? (
-                <div className="rounded-[28px] border border-dashed border-slate-300 bg-white p-10 text-center text-sm text-slate-500 shadow-sm">
-                  No systems yet. Add one from the left and the table stops
-                  being a barren wasteland.
                 </div>
-              ) : (
-                filteredSections.map((section) => {
+                <div className="grid gap-4 content-start">
+                  <SummaryTile
+                    label="Printable patient name"
+                    value={englishFallback(patientName)}
+                  />
+                  <SummaryTile
+                    label="Printable MRN"
+                    value={englishFallback(mrn)}
+                  />
+                  <SummaryTile
+                    label="Printable DOB"
+                    value={englishFallback(dob)}
+                  />
+                  <SummaryTile
+                    label="Supervising doctor"
+                    value={englishFallback(supervisingDoctor)}
+                  />
+                </div>
+              </div>
+            </section>
+          ) : null}
+
+          {activeTab === "medications" ? (
+            <section className="space-y-5 print-card">
+              <div className="section-card">
+                <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+                  <div>
+                    <h3 className="text-2xl font-bold">
+                      Medications by system
+                    </h3>
+                    <p className="mt-2 text-sm text-[rgb(var(--muted))]">
+                      Desktop and iPad get a table. Mobile gets stacked cards.
+                      Same data, less nonsense.
+                    </p>
+                  </div>
+
+                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-[240px_180px_auto_auto] xl:items-end no-print">
+                    <Field label="Search rows">
+                      <TextInput
+                        value={search}
+                        onChange={(event) => setSearch(event.target.value)}
+                        placeholder="Search medication, diagnosis, plan..."
+                      />
+                    </Field>
+                    <Field label="Add system">
+                      <SelectInput
+                        value={addSystemId}
+                        onChange={(event) => setAddSystemId(event.target.value)}
+                      >
+                        <option value="">Pick system</option>
+                        {systems.map((system) => (
+                          <option key={system.id} value={system.id}>
+                            {system.name}
+                          </option>
+                        ))}
+                      </SelectInput>
+                    </Field>
+                    <div className="flex flex-wrap gap-2 xl:pb-1">
+                      <button
+                        type="button"
+                        className="btn-primary"
+                        onClick={() => addSystemSection(addSystemId)}
+                        disabled={!systemsLoaded}
+                      >
+                        Add system section
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        onClick={() => setCompactMode((value) => !value)}
+                      >
+                        {compactMode ? "Normal spacing" : "Compact mode"}
+                      </button>
+                    </div>
+                    <label className="chip xl:mb-1 cursor-pointer justify-center">
+                      <input
+                        type="checkbox"
+                        checked={incompleteOnly}
+                        onChange={(event) =>
+                          setIncompleteOnly(event.target.checked)
+                        }
+                      />
+                      Incomplete only
+                    </label>
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid gap-5">
+                {filteredSections.map((section) => {
                   const system = systemById.get(section.systemId);
-                  const diagnosisOptions = system?.diagnoses ?? [];
+                  const diagnosisOptions = system?.diagnoses || [];
+                  const mergedSuggestions: SuggestionStore = {
+                    medications: suggestions.medications,
+                    doses: suggestions.doses,
+                    how: suggestions.how,
+                    purposes: suggestions.purposes,
+                    plans: suggestions.plans,
+                  };
 
                   return (
                     <div
                       key={section.id}
-                      className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm"
+                      className={compactMode ? "space-y-3" : "space-y-4"}
                     >
-                      <div className="flex flex-col gap-3 border-b border-slate-200 pb-5 lg:flex-row lg:items-end lg:justify-between">
-                        <div className="grid flex-1 gap-4 md:grid-cols-[1fr_260px]">
-                          <Field label="System">
-                            <select
-                              value={section.systemId}
-                              onChange={(e) =>
-                                updateSection(section.id, {
-                                  systemId: e.target.value,
-                                  diagnosis: "",
-                                })
-                              }
-                              className="field"
-                            >
-                              <option value="">Select system</option>
-                              {systems.map((entry) => (
-                                <option key={entry.id} value={entry.id}>
-                                  {entry.name}
-                                </option>
-                              ))}
-                            </select>
-                          </Field>
-
-                          <Field label="Diagnosis date if available">
-                            <input
-                              value={section.diagnosisDate}
-                              onChange={(e) =>
-                                updateSection(section.id, {
-                                  diagnosisDate: e.target.value,
-                                })
-                              }
-                              className="field"
-                              placeholder="Optional"
-                            />
-                          </Field>
-                        </div>
-
-                        <div className="flex flex-wrap gap-2">
-                          <button
-                            type="button"
-                            onClick={() => addMedicationRow(section.id)}
-                            className="rounded-2xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-blue-700"
-                          >
-                            Add medication row
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => removeSection(section.id)}
-                            className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-semibold text-rose-700 transition hover:bg-rose-100"
-                          >
-                            Remove system
-                          </button>
-                        </div>
+                      <div className="hidden md:block">
+                        <MedicationDesktopTable
+                          section={section}
+                          systems={systems}
+                          system={system}
+                          diagnosisOptions={diagnosisOptions}
+                          suggestions={mergedSuggestions}
+                          onSectionChange={(patch) =>
+                            updateSection(section.id, patch)
+                          }
+                          onRowChange={(rowId, patch) =>
+                            updateRow(section.id, rowId, patch)
+                          }
+                          onAddRow={() => addRow(section.id)}
+                          onDuplicateRow={(rowId) =>
+                            duplicateRow(section.id, rowId)
+                          }
+                          onDeleteRow={(rowId) => deleteRow(section.id, rowId)}
+                          onRemoveSection={() => removeSection(section.id)}
+                        />
                       </div>
-
-                      <div className="mt-5">
-                        <Field label="Diagnosis">
-                          <>
-                            <input
-                              value={section.diagnosis}
-                              onChange={(e) =>
-                                updateSection(section.id, {
-                                  diagnosis: e.target.value,
-                                })
-                              }
-                              list={`diagnosis-list-${section.id}`}
-                              className="field"
-                              placeholder="Select or type a diagnosis"
-                            />
-                            <datalist id={`diagnosis-list-${section.id}`}>
-                              {diagnosisOptions.map((diagnosis) => (
-                                <option key={diagnosis} value={diagnosis} />
-                              ))}
-                            </datalist>
-                          </>
-                        </Field>
-                      </div>
-
-                      <div className="mt-5 hidden overflow-x-auto rounded-3xl border border-slate-200 lg:block">
-                        <table className="min-w-[1180px] divide-y divide-slate-200">
-                          <thead className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">
-                            <tr>
-                              <th className="px-4 py-3">Medication</th>
-                              <th className="px-4 py-3">Dose</th>
-                              <th className="px-4 py-3">How to take</th>
-                              <th className="px-4 py-3">Used for</th>
-                              <th className="px-4 py-3">
-                                Agreed plan / next review
-                              </th>
-                              <th className="px-4 py-3">Actions</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-slate-200 bg-white">
-                            {section.rows.map((row) => (
-                              <tr key={row.id} className="align-top">
-                                <td className="px-4 py-4">
-                                  <input
-                                    value={row.medication}
-                                    onChange={(e) =>
-                                      updateRow(section.id, row.id, {
-                                        medication: e.target.value,
-                                      })
-                                    }
-                                    list={`med-list-${row.id}`}
-                                    className="field"
-                                    placeholder="Medication name"
-                                  />
-                                  <datalist id={`med-list-${row.id}`}>
-                                    {allMedicationSuggestions.map((value) => (
-                                      <option key={value} value={value} />
-                                    ))}
-                                  </datalist>
-                                </td>
-                                <td className="px-4 py-4">
-                                  <input
-                                    value={row.dose}
-                                    onChange={(e) =>
-                                      updateRow(section.id, row.id, {
-                                        dose: e.target.value,
-                                      })
-                                    }
-                                    list={`dose-list-${row.id}`}
-                                    className="field"
-                                    placeholder="Dose"
-                                  />
-                                  <datalist id={`dose-list-${row.id}`}>
-                                    {allDoseSuggestions.map((value) => (
-                                      <option key={value} value={value} />
-                                    ))}
-                                  </datalist>
-                                </td>
-                                <td className="px-4 py-4">
-                                  <input
-                                    value={row.how}
-                                    onChange={(e) =>
-                                      updateRow(section.id, row.id, {
-                                        how: e.target.value,
-                                      })
-                                    }
-                                    list={`how-list-${row.id}`}
-                                    className="field"
-                                    placeholder="How to take"
-                                  />
-                                  <datalist id={`how-list-${row.id}`}>
-                                    {allHowSuggestions.map((value) => (
-                                      <option key={value} value={value} />
-                                    ))}
-                                  </datalist>
-                                </td>
-                                <td className="px-4 py-4">
-                                  <input
-                                    value={row.purpose}
-                                    onChange={(e) =>
-                                      updateRow(section.id, row.id, {
-                                        purpose: e.target.value,
-                                      })
-                                    }
-                                    list={`purpose-list-${row.id}`}
-                                    className="field"
-                                    placeholder="Optional"
-                                  />
-                                  <datalist id={`purpose-list-${row.id}`}>
-                                    {allPurposeSuggestions.map((value) => (
-                                      <option key={value} value={value} />
-                                    ))}
-                                  </datalist>
-                                </td>
-                                <td className="px-4 py-4">
-                                  <input
-                                    value={row.plan}
-                                    onChange={(e) =>
-                                      updateRow(section.id, row.id, {
-                                        plan: e.target.value,
-                                      })
-                                    }
-                                    list={`plan-list-${row.id}`}
-                                    className="field"
-                                    placeholder="Optional"
-                                  />
-                                  <datalist id={`plan-list-${row.id}`}>
-                                    {allPlanSuggestions.map((value) => (
-                                      <option key={value} value={value} />
-                                    ))}
-                                  </datalist>
-                                </td>
-                                <td className="px-4 py-4">
-                                  <div className="flex flex-wrap gap-2">
-                                    <button
-                                      type="button"
-                                      onClick={() =>
-                                        duplicateRow(section.id, row.id)
-                                      }
-                                      className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
-                                    >
-                                      Duplicate
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() =>
-                                        removeRow(section.id, row.id)
-                                      }
-                                      className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 transition hover:bg-rose-100"
-                                    >
-                                      Delete
-                                    </button>
-                                  </div>
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-
-                      <div className="mt-5 space-y-3 lg:hidden">
-                        {section.rows.map((row, index) => (
-                          <div
-                            key={row.id}
-                            className="rounded-3xl border border-slate-200 bg-slate-50 p-4"
-                          >
-                            <div className="mb-3 flex items-center justify-between">
-                              <div className="text-sm font-semibold text-slate-900">
-                                Medication row {index + 1}
-                              </div>
-                              <div className="flex gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    duplicateRow(section.id, row.id)
-                                  }
-                                  className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700"
-                                >
-                                  Duplicate
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => removeRow(section.id, row.id)}
-                                  className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700"
-                                >
-                                  Delete
-                                </button>
-                              </div>
-                            </div>
-
-                            <div className="grid gap-4 md:grid-cols-2">
-                              <Field label="Medication">
-                                <>
-                                  <input
-                                    value={row.medication}
-                                    onChange={(e) =>
-                                      updateRow(section.id, row.id, {
-                                        medication: e.target.value,
-                                      })
-                                    }
-                                    list={`med-mobile-${row.id}`}
-                                    className="field"
-                                    placeholder="Medication name"
-                                  />
-                                  <datalist id={`med-mobile-${row.id}`}>
-                                    {allMedicationSuggestions.map((value) => (
-                                      <option key={value} value={value} />
-                                    ))}
-                                  </datalist>
-                                </>
-                              </Field>
-                              <Field label="Dose">
-                                <>
-                                  <input
-                                    value={row.dose}
-                                    onChange={(e) =>
-                                      updateRow(section.id, row.id, {
-                                        dose: e.target.value,
-                                      })
-                                    }
-                                    list={`dose-mobile-${row.id}`}
-                                    className="field"
-                                    placeholder="Dose"
-                                  />
-                                  <datalist id={`dose-mobile-${row.id}`}>
-                                    {allDoseSuggestions.map((value) => (
-                                      <option key={value} value={value} />
-                                    ))}
-                                  </datalist>
-                                </>
-                              </Field>
-                              <Field label="How to take">
-                                <>
-                                  <input
-                                    value={row.how}
-                                    onChange={(e) =>
-                                      updateRow(section.id, row.id, {
-                                        how: e.target.value,
-                                      })
-                                    }
-                                    list={`how-mobile-${row.id}`}
-                                    className="field"
-                                    placeholder="How to take"
-                                  />
-                                  <datalist id={`how-mobile-${row.id}`}>
-                                    {allHowSuggestions.map((value) => (
-                                      <option key={value} value={value} />
-                                    ))}
-                                  </datalist>
-                                </>
-                              </Field>
-                              <Field label="Used for">
-                                <>
-                                  <input
-                                    value={row.purpose}
-                                    onChange={(e) =>
-                                      updateRow(section.id, row.id, {
-                                        purpose: e.target.value,
-                                      })
-                                    }
-                                    list={`purpose-mobile-${row.id}`}
-                                    className="field"
-                                    placeholder="Optional"
-                                  />
-                                  <datalist id={`purpose-mobile-${row.id}`}>
-                                    {allPurposeSuggestions.map((value) => (
-                                      <option key={value} value={value} />
-                                    ))}
-                                  </datalist>
-                                </>
-                              </Field>
-                              <Field label="Agreed plan / next review">
-                                <>
-                                  <input
-                                    value={row.plan}
-                                    onChange={(e) =>
-                                      updateRow(section.id, row.id, {
-                                        plan: e.target.value,
-                                      })
-                                    }
-                                    list={`plan-mobile-${row.id}`}
-                                    className="field"
-                                    placeholder="Optional"
-                                  />
-                                  <datalist id={`plan-mobile-${row.id}`}>
-                                    {allPlanSuggestions.map((value) => (
-                                      <option key={value} value={value} />
-                                    ))}
-                                  </datalist>
-                                </>
-                              </Field>
-                            </div>
-                          </div>
-                        ))}
+                      <div className="md:hidden">
+                        <MedicationMobileCards
+                          section={section}
+                          systems={systems}
+                          systemName={system?.name || ""}
+                          diagnosisOptions={diagnosisOptions}
+                          suggestions={mergedSuggestions}
+                          onSectionChange={(patch) =>
+                            updateSection(section.id, patch)
+                          }
+                          onRowChange={(rowId, patch) =>
+                            updateRow(section.id, rowId, patch)
+                          }
+                          onAddRow={() => addRow(section.id)}
+                          onDuplicateRow={(rowId) =>
+                            duplicateRow(section.id, rowId)
+                          }
+                          onDeleteRow={(rowId) => deleteRow(section.id, rowId)}
+                          onRemoveSection={() => removeSection(section.id)}
+                        />
                       </div>
                     </div>
                   );
-                })
-              )}
-            </div>
-          </section>
-        )}
+                })}
+              </div>
+            </section>
+          ) : null}
 
-        {tab === "review" && (
-          <section className="grid gap-4 xl:grid-cols-[1fr_1.15fr]">
-            <div className="space-y-4">
-              <div className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
-                <div className="mb-5">
-                  <h2 className="text-xl font-semibold text-slate-950">
-                    Review details
-                  </h2>
-                  <p className="mt-1 text-sm text-slate-500">
-                    These fields also stay editable even if transcript import
-                    filled them first.
+          {activeTab === "review" ? (
+            <section className="grid gap-5 xl:grid-cols-[1.05fr_0.95fr] print-card">
+              <div className="section-card space-y-5">
+                <div>
+                  <h3 className="text-2xl font-bold">Review details</h3>
+                  <p className="mt-2 text-sm text-[rgb(var(--muted))]">
+                    These fields print in the final report. Internal AI support
+                    does not.
                   </p>
                 </div>
 
-                <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
-                  <div className="font-semibold">Internal AI suggestion</div>
-                  <div className="mt-1 whitespace-pre-wrap text-amber-800">
-                    {aiSuggestion || "No AI suggestion yet."}
-                  </div>
-                </div>
-
-                <div className="grid gap-4 md:grid-cols-2">
+                <div className="grid gap-5 md:grid-cols-2">
                   <Field label="Review date">
-                    <input
+                    <TextInput
                       type="date"
-                      value={reviewDate}
-                      onChange={(e) => setReviewDate(e.target.value)}
-                      className="field"
+                      value={toInputDate(reviewDate)}
+                      onChange={(event) =>
+                        setReviewDate(fromInputDate(event.target.value))
+                      }
                     />
                   </Field>
                   <Field label="Review completed by">
-                    <input
+                    <TextInput
                       value={reviewCompletedBy}
-                      onChange={(e) => setReviewCompletedBy(e.target.value)}
-                      className="field"
+                      onChange={(event) =>
+                        setReviewCompletedBy(event.target.value)
+                      }
                       placeholder="Clinician name"
                     />
                   </Field>
-                  <Field label="Next review date">
-                    <input
-                      type="date"
-                      value={nextReviewDate}
-                      onChange={(e) => setNextReviewDate(e.target.value)}
-                      className="field"
+                  <Field label="Treatment goals">
+                    <TextArea
+                      value={treatmentGoals}
+                      onChange={(event) =>
+                        setTreatmentGoals(event.target.value)
+                      }
+                      rows={4}
                     />
                   </Field>
-                  <Field label="Mode">
-                    <select
+                  <Field label="Next review date">
+                    <TextInput
+                      type="date"
+                      value={toInputDate(nextReviewDate)}
+                      onChange={(event) =>
+                        setNextReviewDate(fromInputDate(event.target.value))
+                      }
+                    />
+                  </Field>
+                  <Field label="Next review mode">
+                    <SelectInput
                       value={nextReviewMode}
-                      onChange={(e) =>
+                      onChange={(event) =>
                         setNextReviewMode(
-                          e.target.value as "" | "In-person" | "Video",
+                          event.target.value as "" | "In-person" | "Video",
                         )
                       }
-                      className="field"
                     >
                       <option value="">Select mode</option>
                       <option value="In-person">In-person</option>
                       <option value="Video">Video</option>
-                    </select>
-                  </Field>
-                </div>
-
-                <div className="mt-4 grid gap-4">
-                  <Field label="Treatment goals">
-                    <textarea
-                      value={treatmentGoals}
-                      onChange={(e) => setTreatmentGoals(e.target.value)}
-                      className="field min-h-[120px]"
-                      placeholder="Treatment goals"
-                    />
+                    </SelectInput>
                   </Field>
                   <Field label="Before next review">
-                    <textarea
+                    <TextArea
                       value={beforeNextReview}
-                      onChange={(e) => setBeforeNextReview(e.target.value)}
-                      className="field min-h-[120px]"
-                      placeholder="Tasks before next review"
-                    />
-                  </Field>
-                  <Field label="Notes">
-                    <textarea
-                      value={notes}
-                      onChange={(e) => setNotes(e.target.value)}
-                      className="field min-h-[140px]"
-                      placeholder="Printable notes"
-                    />
-                  </Field>
-                  <Field
-                    label="AI suggestion"
-                    hint="Internal clinician-only suggestion. This does not appear in the printed patient report."
-                  >
-                    <textarea
-                      value={aiSuggestion}
-                      onChange={(e) => setAiSuggestion(e.target.value)}
-                      className="field min-h-[160px]"
-                      placeholder="AI impression and treatment suggestion"
+                      onChange={(event) =>
+                        setBeforeNextReview(event.target.value)
+                      }
+                      rows={4}
                     />
                   </Field>
                 </div>
-              </div>
-            </div>
 
-            <div className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
-              <div className="flex flex-col gap-2 border-b border-slate-200 pb-4 sm:flex-row sm:items-center sm:justify-between">
-                <div>
-                  <h2 className="text-2xl font-semibold text-slate-950">
-                    Printable preview
-                  </h2>
-                  <p className="mt-1 text-sm text-slate-500">
-                    English preview. Arabic version is generated at export time.
-                  </p>
+                <Field label="Notes">
+                  <TextArea
+                    value={notes}
+                    onChange={(event) => setNotes(event.target.value)}
+                    rows={7}
+                  />
+                </Field>
+              </div>
+
+              <div className="section-card space-y-5">
+                <div className="rounded-3xl border border-[rgba(var(--primary),0.12)] bg-[linear-gradient(135deg,rgba(var(--primary),0.10),rgba(var(--primary),0.03))] p-5">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <div className="kicker">Internal only</div>
+                      <h3 className="mt-2 text-xl font-bold">
+                        AI clinical support
+                      </h3>
+                      <p className="mt-2 text-sm leading-6 text-[rgb(var(--muted))]">
+                        This is for the clinician or staff member inside the
+                        app. It does not appear in the printable patient report.
+                      </p>
+                    </div>
+                    <span className="chip">
+                      Confidence: {aiClinicalSupport.confidence || "—"}
+                    </span>
+                  </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setExportOpen(true)}
-                  className="rounded-2xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-blue-700"
-                >
-                  Download PDF
-                </button>
-              </div>
 
-              <div className="mt-5 grid gap-4 sm:grid-cols-2">
-                <SummaryTile
-                  label="Patient name"
-                  value={previewPayload.patientName || "—"}
-                />
-                <SummaryTile
-                  label="Date of birth"
-                  value={previewPayload.dob || "—"}
-                />
-                <SummaryTile
-                  label="MRN / case number"
-                  value={previewPayload.mrn || "—"}
-                />
-                <SummaryTile
-                  label="Occupation"
-                  value={previewPayload.occupation || "—"}
-                />
-                <SummaryTile
-                  label="Supervising doctor"
-                  value={previewPayload.supervisingDoctor || "—"}
-                />
-                <SummaryTile
-                  label="Carer"
-                  value={previewPayload.carer || "—"}
-                />
-                <SummaryTile
-                  label="Allergies"
-                  value={previewPayload.allergies || "—"}
-                />
-                <SummaryTile
-                  label="Intolerances"
-                  value={previewPayload.intolerances || "—"}
-                />
-              </div>
-
-              <div className="mt-6">
-                <div className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">
-                  Significant history
+                <div className="grid gap-4">
+                  <Field label="Summary">
+                    <TextArea
+                      value={aiClinicalSupport.summary}
+                      onChange={(event) =>
+                        setAiClinicalSupport((current) => ({
+                          ...current,
+                          summary: event.target.value,
+                        }))
+                      }
+                      rows={4}
+                    />
+                  </Field>
+                  <Field label="Likely diagnosis">
+                    <TextInput
+                      value={aiClinicalSupport.likelyDiagnosis}
+                      onChange={(event) =>
+                        setAiClinicalSupport((current) => ({
+                          ...current,
+                          likelyDiagnosis: event.target.value,
+                        }))
+                      }
+                      placeholder="Likely diagnosis"
+                    />
+                  </Field>
+                  <Field label="Reasoning">
+                    <TextArea
+                      value={aiClinicalSupport.reasoning}
+                      onChange={(event) =>
+                        setAiClinicalSupport((current) => ({
+                          ...current,
+                          reasoning: event.target.value,
+                        }))
+                      }
+                      rows={4}
+                    />
+                  </Field>
+                  <Field label="Medication options / current treatment">
+                    <TextArea
+                      value={aiClinicalSupport.medicationOptions.join("\n")}
+                      onChange={(event) =>
+                        setAiClinicalSupport((current) => ({
+                          ...current,
+                          medicationOptions: uniqKeepOrder(
+                            event.target.value.split(/\n+/),
+                          ),
+                        }))
+                      }
+                      rows={5}
+                    />
+                  </Field>
+                  <Field label="Suggested next steps">
+                    <TextArea
+                      value={aiClinicalSupport.nextSteps.join("\n")}
+                      onChange={(event) =>
+                        setAiClinicalSupport((current) => ({
+                          ...current,
+                          nextSteps: uniqKeepOrder(
+                            event.target.value.split(/\n+/),
+                          ),
+                        }))
+                      }
+                      rows={5}
+                    />
+                  </Field>
+                  <Field label="Red flags">
+                    <TextArea
+                      value={aiClinicalSupport.redFlags.join("\n")}
+                      onChange={(event) =>
+                        setAiClinicalSupport((current) => ({
+                          ...current,
+                          redFlags: uniqKeepOrder(
+                            event.target.value.split(/\n+/),
+                          ),
+                        }))
+                      }
+                      rows={5}
+                    />
+                  </Field>
+                  <Field label="Confidence">
+                    <SelectInput
+                      value={aiClinicalSupport.confidence}
+                      onChange={(event) =>
+                        setAiClinicalSupport((current) => ({
+                          ...current,
+                          confidence: event.target
+                            .value as AiClinicalSupport["confidence"],
+                        }))
+                      }
+                    >
+                      <option value="">Select confidence</option>
+                      <option value="low">Low</option>
+                      <option value="medium">Medium</option>
+                      <option value="high">High</option>
+                    </SelectInput>
+                  </Field>
                 </div>
-                <div className="mt-2 whitespace-pre-wrap rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-800">
-                  {previewPayload.significantHistory || "—"}
-                </div>
-              </div>
 
-              <div className="mt-6 overflow-hidden rounded-3xl border border-slate-200">
-                <table className="min-w-full divide-y divide-slate-200">
-                  <thead className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">
-                    <tr>
-                      <th className="px-4 py-3">System</th>
-                      <th className="px-4 py-3">
-                        Diagnosis and date if available
-                      </th>
-                      <th className="px-4 py-3">Medication & Dose</th>
-                      <th className="px-4 py-3">How to take</th>
-                      <th className="px-4 py-3">What are they for?</th>
-                      <th className="px-4 py-3">Agreed Plan / Next Review</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-200 bg-white text-sm text-slate-800">
-                    {previewPayload.rows.length ? (
-                      previewPayload.rows.map((row, index) => (
-                        <tr key={`${row.system}-${row.medication}-${index}`}>
-                          <td className="px-4 py-3">{row.system || "—"}</td>
-                          <td className="px-4 py-3">
-                            {[row.diagnosis, row.diagnosisDate]
-                              .filter(Boolean)
-                              .join(" • ") || "—"}
-                          </td>
-                          <td className="px-4 py-3">
-                            {[row.medication, row.dose]
-                              .filter(Boolean)
-                              .join(" • ") || "—"}
-                          </td>
-                          <td className="px-4 py-3">{row.how || "—"}</td>
-                          <td className="px-4 py-3">{row.purpose || "—"}</td>
-                          <td className="px-4 py-3">{row.plan || "—"}</td>
-                        </tr>
-                      ))
-                    ) : (
-                      <tr>
-                        <td
-                          colSpan={6}
-                          className="px-4 py-8 text-center text-slate-500"
-                        >
-                          No medication rows added yet.
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
+                {lastDraft?.warnings.length ? (
+                  <div className="rounded-2xl border border-[rgba(var(--warning),0.25)] bg-[rgba(var(--warning),0.08)] p-4 text-sm text-[rgb(var(--text))]">
+                    <div className="font-semibold">Draft warnings</div>
+                    <ul className="mt-2 list-disc space-y-1 pl-5 text-[rgb(var(--muted))]">
+                      {lastDraft.warnings.map((warning) => (
+                        <li key={warning}>{warning}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
               </div>
-
-              <div className="mt-6 grid gap-4 sm:grid-cols-2">
-                <SummaryTile
-                  label="Review date"
-                  value={previewPayload.reviewDate || "—"}
-                />
-                <SummaryTile
-                  label="Review completed by"
-                  value={previewPayload.reviewCompletedBy || "—"}
-                />
-                <SummaryTile
-                  label="Treatment goals"
-                  value={previewPayload.treatmentGoals || "—"}
-                />
-                <SummaryTile
-                  label="Next review"
-                  value={
-                    [
-                      previewPayload.nextReviewDate,
-                      previewPayload.nextReviewMode,
-                    ]
-                      .filter(Boolean)
-                      .join(" • ") || "—"
-                  }
-                />
-                <SummaryTile
-                  label="Before next review"
-                  value={previewPayload.beforeNextReview || "—"}
-                />
-                <SummaryTile
-                  label="Notes"
-                  value={previewPayload.notes || "—"}
-                />
-              </div>
-            </div>
-          </section>
-        )}
-      </main>
-
-      {exportOpen && (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 px-4">
-          <div className="w-full max-w-md rounded-[28px] border border-slate-200 bg-white p-6 shadow-2xl">
-            <h3 className="text-xl font-semibold text-slate-950">
-              Download report PDF
-            </h3>
-            <p className="mt-2 text-sm leading-6 text-slate-600">
-              Choose the export language. English downloads as-is. Arabic
-              translates the report text online while keeping medication names
-              and patient name untouched.
-            </p>
-            <div className="mt-5 grid gap-3">
-              <button
-                type="button"
-                onClick={() => void handleExport("en")}
-                disabled={!!exportBusy}
-                className="rounded-2xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {exportBusy === "en"
-                  ? "Preparing English PDF..."
-                  : "English PDF"}
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleExport("ar")}
-                disabled={!!exportBusy}
-                className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-900 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {exportBusy === "ar" ? "Preparing Arabic PDF..." : "Arabic PDF"}
-              </button>
-            </div>
-            <button
-              type="button"
-              onClick={() => setExportOpen(false)}
-              disabled={!!exportBusy}
-              className="mt-3 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
+            </section>
+          ) : null}
+        </>
       )}
 
-      {toast && (
-        <div className="fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-full border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-800 shadow-lg">
+      {toast ? (
+        <div
+          className={`no-print fixed bottom-4 right-4 z-50 max-w-sm rounded-2xl px-4 py-3 text-sm font-semibold text-white shadow-lg ${
+            toast.tone === "error"
+              ? "bg-[rgb(var(--danger))]"
+              : "bg-[rgb(var(--text))]"
+          }`}
+        >
           {toast.message}
         </div>
-      )}
-
-      <style jsx global>{`
-        .field {
-          width: 100%;
-          border-radius: 18px;
-          border: 1px solid rgb(226 232 240);
-          background: white;
-          padding: 0.9rem 1rem;
-          font-size: 0.95rem;
-          line-height: 1.5;
-          color: rgb(15 23 42);
-          outline: none;
-          transition:
-            border-color 120ms ease,
-            box-shadow 120ms ease,
-            background 120ms ease;
-        }
-
-        .field::placeholder {
-          color: rgb(148 163 184);
-        }
-
-        .field:focus {
-          border-color: rgb(59 130 246);
-          box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.14);
-        }
-
-        textarea.field {
-          resize: vertical;
-        }
-      `}</style>
-    </div>
+      ) : null}
+    </main>
   );
 }

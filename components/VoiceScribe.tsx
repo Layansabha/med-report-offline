@@ -1,16 +1,23 @@
 "use client";
 
-import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-type ExtractionJobStatus = "queued" | "processing" | "done" | "error";
-type UiPhase = "idle" | "recording" | "processing" | "applied" | "error";
+export type ConfidenceLevel = "" | "low" | "medium" | "high";
 
-const SCRIBE_STORAGE_KEY = "imr_v4_scribe";
+export type AiClinicalSupport = {
+  summary: string;
+  likelyDiagnosis: string;
+  reasoning: string;
+  medicationOptions: string[];
+  nextSteps: string[];
+  redFlags: string[];
+  confidence: ConfidenceLevel;
+};
 
 export type ScribeMedication = {
   systemId: string;
   diagnosis: string;
-  rawMedication?: string;
+  rawMedication: string;
   medication: string;
   dose: string;
   how: string;
@@ -19,635 +26,478 @@ export type ScribeMedication = {
 };
 
 export type ScribeDraft = {
-  transcript?: string;
-  patientName?: string;
-  caseNumber?: string;
-  dob?: string;
-  age?: string;
-  sex?: string;
-  occupation?: string;
-  supervisingDoctor?: string;
-  carer?: string;
-  allergies?: string;
-  intolerances?: string;
-  chiefComplaint?: string;
-  significantHistory?: string;
-  associatedSymptoms?: string[];
-  examFindings?: string;
-  labSummary?: string;
-  imagingSummary?: string;
-  diagnosisHints?: string[];
-  reviewCompletedBy?: string;
-  treatmentGoals?: string;
-  nextReviewDate?: string;
-  nextReviewMode?: "In-person" | "Video" | "";
-  beforeNextReview?: string;
-  notes?: string;
-  aiSuggestion?: string;
-  medications?: ScribeMedication[];
-  warnings?: string[];
+  transcript: string;
+  patientName: string;
+  caseNumber: string;
+  dob: string;
+  age: string;
+  sex: string;
+  occupation: string;
+  supervisingDoctor: string;
+  carer: string;
+  allergies: string;
+  intolerances: string;
+  chiefComplaint: string;
+  significantHistory: string;
+  associatedSymptoms: string[];
+  examFindings: string;
+  labSummary: string;
+  imagingSummary: string;
+  diagnosisHints: string[];
+  reviewCompletedBy: string;
+  treatmentGoals: string;
+  nextReviewDate: string;
+  nextReviewMode: "" | "In-person" | "Video";
+  beforeNextReview: string;
+  notes: string;
+  aiSuggestion: string;
+  aiClinicalSupport: AiClinicalSupport;
+  medications: ScribeMedication[];
+  warnings: string[];
+  timings?: {
+    totalMs?: number;
+    byStep?: Record<string, number>;
+    steps?: Array<{ step: string; ms: number }>;
+  };
+};
+
+type TranscribeResult = {
+  text?: string;
+  mixedText?: string;
+  language?: string;
+  languageHint?: string;
+  duration?: number | null;
+  model?: string;
+  error?: string;
 };
 
 type VoiceScribeProps = {
-  onApply?: (draft: ScribeDraft) => void;
-  resetSignal?: number;
+  onApplyDraft: (draft: ScribeDraft) => void;
 };
 
-type PersistedScribeState = {
-  phase: UiPhase;
-  transcript: string;
-  detectedLanguage: string;
-  jobId: string;
-  jobStatus: ExtractionJobStatus | "";
-  result: ScribeDraft | null;
-  error: string;
-};
-
-function pickSupportedMimeType(): string {
-  if (typeof window === "undefined" || typeof MediaRecorder === "undefined") {
-    return "";
-  }
-
-  const candidates = [
-    "audio/webm;codecs=opus",
-    "audio/webm",
-    "audio/mp4",
-    "audio/mp4;codecs=mp4a.40.2",
-    "audio/ogg;codecs=opus",
-  ];
-
-  for (const candidate of candidates) {
-    try {
-      if (MediaRecorder.isTypeSupported(candidate)) {
-        return candidate;
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  return "";
+function compactText(value: string) {
+  return (value || "").replace(/\s+/g, " ").trim();
 }
 
-function fileExtensionFromMimeType(mimeType: string): string {
-  const lower = mimeType.toLowerCase();
-
-  if (lower.includes("mp4") || lower.includes("m4a")) return "m4a";
-  if (lower.includes("ogg")) return "ogg";
-  if (lower.includes("mpeg") || lower.includes("mp3")) return "mp3";
-  return "webm";
+function formatMs(value?: number) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "—";
+  if (value < 1000) return `${Math.round(value)} ms`;
+  return `${(value / 1000).toFixed(2)} s`;
 }
 
-function summarizeAppliedResult(result: ScribeDraft | null) {
-  if (!result) return "";
-
-  const parts: string[] = [];
-
-  if (result.patientName?.trim()) parts.push("patient name");
-  if (result.caseNumber?.trim()) parts.push("case number");
-  if (result.occupation?.trim()) parts.push("occupation");
-  if (result.supervisingDoctor?.trim()) parts.push("supervising doctor");
-  if (result.significantHistory?.trim()) parts.push("history");
-  if (result.aiSuggestion?.trim()) parts.push("AI clinical support");
-  if ((result.medications?.length ?? 0) > 0) {
-    parts.push(
-      `${result.medications!.length} medication${
-        result.medications!.length > 1 ? "s" : ""
-      }`,
-    );
-  }
-
-  return parts.join(" • ");
+function readErrorMessage(error: unknown) {
+  if (error instanceof Error) return error.message;
+  return "Unexpected request failure.";
 }
 
-export default function VoiceScribe({
-  onApply,
-  resetSignal = 0,
-}: VoiceScribeProps) {
-  const [isRecording, setIsRecording] = useState(false);
-  const [isStopping, setIsStopping] = useState(false);
-  const [isTranscribing, setIsTranscribing] = useState(false);
-  const [phase, setPhase] = useState<UiPhase>("idle");
+export default function VoiceScribe({ onApplyDraft }: VoiceScribeProps) {
   const [transcript, setTranscript] = useState("");
-  const [detectedLanguage, setDetectedLanguage] = useState("");
-  const [jobId, setJobId] = useState("");
-  const [jobStatus, setJobStatus] = useState<ExtractionJobStatus | "">("");
-  const [result, setResult] = useState<ScribeDraft | null>(null);
-  const [error, setError] = useState("");
+  const [draft, setDraft] = useState<ScribeDraft | null>(null);
+  const [languageHint, setLanguageHint] = useState("");
+  const [duration, setDuration] = useState<number | null>(null);
+  const [transcribeModel, setTranscribeModel] = useState("");
+  const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [isExtracting, setIsExtracting] = useState(false);
+  const [audioFileName, setAudioFileName] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState(
+    "Record audio, upload a file, or paste a transcript, then extract the structured draft.",
+  );
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const chunksRef = useRef<BlobPart[]>([]);
-  const pollTimerRef = useRef<number | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const hasHydratedRef = useRef(false);
 
-  const clearPolling = () => {
-    if (pollTimerRef.current !== null) {
-      window.clearTimeout(pollTimerRef.current);
-      pollTimerRef.current = null;
-    }
-  };
+  useEffect(() => {
+    return () => {
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      mediaRecorderRef.current?.stop?.();
+    };
+  }, []);
 
-  const cleanupMedia = () => {
-    if (mediaRecorderRef.current) {
-      mediaRecorderRef.current.ondataavailable = null;
-      mediaRecorderRef.current.onstop = null;
-      mediaRecorderRef.current.onerror = null;
+  const metrics = useMemo(() => {
+    const words = transcript
+      ? transcript.split(/\s+/).filter(Boolean).length
+      : 0;
+    return {
+      words,
+      meds: draft?.medications.length || 0,
+      warnings: draft?.warnings.length || 0,
+    };
+  }, [draft, transcript]);
 
-      if (mediaRecorderRef.current.state !== "inactive") {
-        try {
-          mediaRecorderRef.current.stop();
-        } catch {
-          // ignore
-        }
-      }
-    }
-
-    if (streamRef.current) {
-      for (const track of streamRef.current.getTracks()) {
-        track.stop();
-      }
-    }
-
-    mediaRecorderRef.current = null;
-    streamRef.current = null;
-    chunksRef.current = [];
-  };
-
-  const hardReset = () => {
-    clearPolling();
-    cleanupMedia();
-    setIsRecording(false);
-    setIsStopping(false);
-    setIsTranscribing(false);
-    setPhase("idle");
-    setTranscript("");
-    setDetectedLanguage("");
-    setJobId("");
-    setJobStatus("");
-    setResult(null);
-    setError("");
+  async function transcribeBlob(blob: Blob, fileName: string) {
+    setError(null);
+    setIsTranscribing(true);
+    setStatus("Transcribing audio...");
+    setAudioFileName(fileName);
 
     try {
-      localStorage.removeItem(SCRIBE_STORAGE_KEY);
-    } catch {
-      // ignore
-    }
-  };
-
-  const pollJob = async (currentJobId: string) => {
-    try {
-      const res = await fetch(`/api/scribe/jobs/${currentJobId}`, {
-        method: "GET",
-        cache: "no-store",
-      });
-
-      const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data?.error || "Failed to fetch extraction job.");
-      }
-
-      setJobStatus(data.status);
-
-      if (data.status === "done") {
-        clearPolling();
-        setResult(data.result);
-        setPhase("applied");
-        setError("");
-        onApply?.(data.result);
-        return;
-      }
-
-      if (data.status === "error") {
-        clearPolling();
-        setError(data.error || "Extraction failed.");
-        setPhase("error");
-        return;
-      }
-
-      setPhase("processing");
-      pollTimerRef.current = window.setTimeout(() => {
-        void pollJob(currentJobId);
-      }, 1200);
-    } catch (err) {
-      clearPolling();
-      setError(err instanceof Error ? err.message : "Polling failed.");
-      setPhase("error");
-    }
-  };
-
-  const submitExtraction = async (rawTranscript: string) => {
-    const cleaned = rawTranscript.trim();
-    if (!cleaned) {
-      throw new Error("No transcript was returned.");
-    }
-
-    setJobId("");
-    setJobStatus("queued");
-    setResult(null);
-    setPhase("processing");
-
-    const res = await fetch("/api/scribe/jobs", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ transcript: cleaned }),
-    });
-
-    const data = await res.json();
-
-    if (!res.ok) {
-      throw new Error(data?.error || "Failed to create extraction job.");
-    }
-
-    setJobId(data.jobId);
-    setJobStatus(data.status);
-    await pollJob(data.jobId);
-  };
-
-  const transcribeBlob = async (blob: Blob, explicitFileName?: string) => {
-    try {
-      setIsTranscribing(true);
-      setError("");
-      setResult(null);
-      setJobId("");
-      setJobStatus("");
-      setDetectedLanguage("");
-      setPhase("processing");
-
-      const mimeType = blob.type || "audio/webm";
-      const ext = fileExtensionFromMimeType(mimeType);
-      const generatedFileName =
-        explicitFileName || `visit-${Date.now()}.${ext}`;
-
-      const file =
-        blob instanceof File
-          ? blob
-          : new File([blob], generatedFileName, { type: mimeType });
-
       const formData = new FormData();
-      formData.append("file", file, file.name);
+      formData.append("file", blob, fileName || `dictation-${Date.now()}.webm`);
 
       const res = await fetch("/api/transcribe", {
         method: "POST",
         body: formData,
       });
 
-      const data = await res.json();
-
+      const payload = (await res.json()) as TranscribeResult;
       if (!res.ok) {
-        throw new Error(data?.error || "Transcription failed.");
+        throw new Error(payload.error || "Transcription failed.");
       }
 
-      const finalTranscript =
-        typeof data?.mixedText === "string"
-          ? data.mixedText.trim()
-          : typeof data?.text === "string"
-            ? data.text.trim()
-            : "";
-
-      setTranscript(finalTranscript);
-      setDetectedLanguage(
-        typeof data?.languageHint === "string"
-          ? data.languageHint
-          : typeof data?.language === "string"
-            ? data.language
-            : "",
+      const nextTranscript = compactText(
+        payload.mixedText || payload.text || "",
       );
-
-      if (!finalTranscript) {
-        throw new Error("No transcript was returned from the audio.");
-      }
-
-      await submitExtraction(finalTranscript);
+      setTranscript(nextTranscript);
+      setLanguageHint(
+        compactText(payload.languageHint || payload.language || ""),
+      );
+      setDuration(
+        typeof payload.duration === "number" ? payload.duration : null,
+      );
+      setTranscribeModel(compactText(payload.model || ""));
+      setStatus(
+        "Transcript ready. Extract the structured draft when you are ready.",
+      );
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Unexpected transcription error.",
-      );
-      setPhase("error");
+      setError(readErrorMessage(err));
+      setStatus("Audio transcription failed.");
     } finally {
       setIsTranscribing(false);
-      setIsRecording(false);
-      setIsStopping(false);
-      cleanupMedia();
     }
-  };
+  }
 
-  const startRecording = async () => {
+  async function startRecording() {
+    setError(null);
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError("This browser does not support audio recording.");
+      return;
+    }
+
     try {
-      if (
-        typeof navigator === "undefined" ||
-        !navigator.mediaDevices?.getUserMedia
-      ) {
-        throw new Error("This browser does not support audio recording.");
-      }
-
-      if (typeof MediaRecorder === "undefined") {
-        throw new Error("MediaRecorder is not supported on this device.");
-      }
-
-      clearPolling();
-      setError("");
-      setResult(null);
-      setTranscript("");
-      setDetectedLanguage("");
-      setJobId("");
-      setJobStatus("");
-      setPhase("idle");
-
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-        video: false,
-      });
-
-      const mimeType = pickSupportedMimeType();
-      const options: MediaRecorderOptions = mimeType
-        ? { mimeType, audioBitsPerSecond: 32000 }
-        : { audioBitsPerSecond: 32000 };
-
-      const recorder = new MediaRecorder(stream, options);
-
-      chunksRef.current = [];
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
       streamRef.current = stream;
       mediaRecorderRef.current = recorder;
+      chunksRef.current = [];
 
-      recorder.ondataavailable = (event: BlobEvent) => {
-        if (event.data && event.data.size > 0) {
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
           chunksRef.current.push(event.data);
         }
       };
 
-      recorder.onerror = (event: Event) => {
-        const maybeEvent = event as Event & {
-          error?: { message?: string };
-        };
-
-        setError(maybeEvent.error?.message || "Recording failed.");
-        setPhase("error");
-        setIsRecording(false);
-        setIsStopping(false);
-        cleanupMedia();
-      };
-
-      recorder.onstop = () => {
-        const finalMimeType = recorder.mimeType || mimeType || "audio/webm";
-        const blob = new Blob(chunksRef.current, { type: finalMimeType });
-
-        if (!blob.size) {
-          setError("The recording is empty.");
-          setPhase("error");
-          setIsRecording(false);
-          setIsStopping(false);
-          cleanupMedia();
-          return;
+      recorder.onstop = async () => {
+        const mimeType = recorder.mimeType || "audio/webm";
+        const blob = new Blob(chunksRef.current, { type: mimeType });
+        chunksRef.current = [];
+        stream.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+        mediaRecorderRef.current = null;
+        if (blob.size) {
+          await transcribeBlob(blob, `dictation-${Date.now()}.webm`);
         }
-
-        const fileName = `visit-${Date.now()}.${fileExtensionFromMimeType(
-          finalMimeType,
-        )}`;
-
-        void transcribeBlob(blob, fileName);
       };
 
-      recorder.start(500);
+      recorder.start();
       setIsRecording(true);
-      setIsStopping(false);
-      setPhase("recording");
+      setStatus("Recording... stop when the dictation is done.");
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to start recording.",
+      setError(readErrorMessage(err));
+      setStatus("Could not start recording.");
+    }
+  }
+
+  function stopRecording() {
+    if (!mediaRecorderRef.current) return;
+    setIsRecording(false);
+    setStatus("Stopping recording and preparing upload...");
+    mediaRecorderRef.current.stop();
+  }
+
+  async function handleFileSelect(file: File | null) {
+    if (!file) return;
+    await transcribeBlob(file, file.name);
+  }
+
+  async function extractDraft() {
+    const cleanedTranscript = compactText(transcript);
+    if (!cleanedTranscript) {
+      setError("Add or generate a transcript first.");
+      return;
+    }
+
+    setError(null);
+    setIsExtracting(true);
+    setStatus("Extracting structured medical draft and AI clinical support...");
+
+    try {
+      const res = await fetch("/api/scribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ transcript: cleanedTranscript }),
+      });
+
+      const payload = (await res.json()) as ScribeDraft & { error?: string };
+      if (!res.ok) {
+        throw new Error(payload.error || "Structured extraction failed.");
+      }
+
+      const nextDraft = {
+        ...payload,
+        transcript: cleanedTranscript,
+      };
+
+      setDraft(nextDraft);
+      setStatus(
+        "Structured draft ready. Review it, then apply it to the form.",
       );
-      setPhase("error");
-      cleanupMedia();
-    }
-  };
-
-  const stopRecording = () => {
-    const recorder = mediaRecorderRef.current;
-
-    if (!recorder || recorder.state !== "recording") {
-      return;
-    }
-
-    setIsStopping(true);
-    recorder.stop();
-  };
-
-  const openFilePicker = () => {
-    fileInputRef.current?.click();
-  };
-
-  const handlePickedFile = (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-
-    if (!file) {
-      return;
-    }
-
-    clearPolling();
-    setError("");
-    setResult(null);
-    setTranscript("");
-    setDetectedLanguage("");
-    setJobId("");
-    setJobStatus("");
-    setPhase("processing");
-
-    void transcribeBlob(file, file.name);
-  };
-
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(SCRIBE_STORAGE_KEY);
-      if (!raw) {
-        hasHydratedRef.current = true;
-        return;
-      }
-
-      const parsed = JSON.parse(raw) as PersistedScribeState;
-      setPhase(parsed.phase ?? "idle");
-      setTranscript(parsed.transcript ?? "");
-      setDetectedLanguage(parsed.detectedLanguage ?? "");
-      setJobId(parsed.jobId ?? "");
-      setJobStatus(parsed.jobStatus ?? "");
-      setResult(parsed.result ?? null);
-      setError(parsed.error ?? "");
-
-      if (
-        parsed.jobId &&
-        (parsed.jobStatus === "queued" || parsed.jobStatus === "processing")
-      ) {
-        void pollJob(parsed.jobId);
-      }
-    } catch {
-      // ignore
+    } catch (err) {
+      setError(readErrorMessage(err));
+      setStatus("Structured extraction failed.");
     } finally {
-      hasHydratedRef.current = true;
+      setIsExtracting(false);
     }
-
-    return () => {
-      clearPolling();
-      cleanupMedia();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    if (!hasHydratedRef.current) return;
-
-    const payload: PersistedScribeState = {
-      phase,
-      transcript,
-      detectedLanguage,
-      jobId,
-      jobStatus,
-      result,
-      error,
-    };
-
-    try {
-      localStorage.setItem(SCRIBE_STORAGE_KEY, JSON.stringify(payload));
-    } catch {
-      // ignore
-    }
-  }, [phase, transcript, detectedLanguage, jobId, jobStatus, result, error]);
-
-  useEffect(() => {
-    if (!resetSignal) return;
-    hardReset();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resetSignal]);
-
-  const busy =
-    isRecording ||
-    isStopping ||
-    isTranscribing ||
-    jobStatus === "queued" ||
-    jobStatus === "processing";
-
-  const phaseLabel = useMemo(() => {
-    if (phase === "recording") return "Recording";
-    if (phase === "processing") return "Processing";
-    if (phase === "applied") return "Imported";
-    if (phase === "error") return "Attention needed";
-    return "Ready";
-  }, [phase]);
-
-  const helperText = useMemo(() => {
-    if (phase === "recording") {
-      return "Recording visit audio. Stop when the dictation is complete.";
-    }
-
-    if (phase === "processing") {
-      return "Processing bilingual audio and applying matched data to the report.";
-    }
-
-    if (phase === "applied") {
-      const summary = summarizeAppliedResult(result);
-      return summary
-        ? `Latest import applied: ${summary}.`
-        : "Latest audio import finished.";
-    }
-
-    if (phase === "error") {
-      return "The audio import needs attention.";
-    }
-
-    return "Record or upload mixed Arabic and English visit audio. The transcript stays bilingual, then patient details, history, review fields, and medications apply directly to the form.";
-  }, [phase, result]);
+  }
 
   return (
-    <section className="rounded-3xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] p-5 shadow-sm">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-        <div className="space-y-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-lg font-semibold text-[rgb(var(--text))]">
-              Voice Intake
+    <section className="glass-card print-card overflow-hidden">
+      <div className="border-b border-[rgb(var(--border))] bg-[linear-gradient(135deg,rgba(var(--primary),0.08),rgba(var(--primary),0.02))] px-5 py-5 sm:px-6">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <div className="kicker">Voice intake</div>
+            <h2 className="mt-2 text-xl font-bold text-[rgb(var(--text))]">
+              Dictation, transcript cleanup, and AI extraction
             </h2>
-            <span
-              className={[
-                "inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold",
-                phase === "applied"
-                  ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                  : phase === "error"
-                    ? "border-rose-200 bg-rose-50 text-rose-700"
-                    : phase === "processing" || phase === "recording"
-                      ? "border-amber-200 bg-amber-50 text-amber-800"
-                      : "border-slate-200 bg-slate-50 text-slate-600",
-              ].join(" ")}
-            >
-              {phaseLabel}
-            </span>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-[rgb(var(--muted))]">
+              The transcript can stay mixed Arabic and English. The AI then
+              extracts as many structured fields as it can, plus an internal
+              clinical support note that stays out of the printable report.
+            </p>
           </div>
 
-          <p className="max-w-3xl text-sm text-[rgb(var(--muted))]">
-            {helperText}
-          </p>
-        </div>
-
-        <div className="flex flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={() => void startRecording()}
-            disabled={busy}
-            className="rounded-2xl bg-[rgb(var(--primary))] px-4 py-2 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {isRecording ? "Recording..." : "Start Recording"}
-          </button>
-
-          <button
-            type="button"
-            onClick={stopRecording}
-            disabled={!isRecording || isStopping}
-            className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-2 text-sm font-semibold text-[rgb(var(--text))] transition hover:bg-[rgba(var(--card),0.7)] disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {isStopping ? "Stopping..." : "Stop"}
-          </button>
-
-          <button
-            type="button"
-            onClick={openFilePicker}
-            disabled={busy}
-            className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--surface))] px-4 py-2 text-sm font-semibold text-[rgb(var(--text))] transition hover:bg-[rgba(var(--card),0.7)] disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            Upload Audio
-          </button>
-
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="audio/*,video/*"
-            className="hidden"
-            onChange={handlePickedFile}
-          />
+          <div className="grid grid-cols-3 gap-3 sm:min-w-[360px]">
+            <div className="metric-card">
+              <div className="metric-label">Transcript words</div>
+              <div className="metric-value">{metrics.words}</div>
+            </div>
+            <div className="metric-card">
+              <div className="metric-label">Med rows</div>
+              <div className="metric-value">{metrics.meds}</div>
+            </div>
+            <div className="metric-card">
+              <div className="metric-label">Warnings</div>
+              <div className="metric-value">{metrics.warnings}</div>
+            </div>
+          </div>
         </div>
       </div>
 
-      {(phase === "recording" || phase === "processing") && (
-        <div className="mt-4 overflow-hidden rounded-full border border-[rgb(var(--border))] bg-[rgba(var(--card),0.7)]">
-          <div
-            className={[
-              "h-2 rounded-full bg-[rgb(var(--primary))] transition-all duration-500",
-              phase === "recording" ? "w-1/3" : "w-2/3",
-            ].join(" ")}
-          />
-        </div>
-      )}
+      <div className="space-y-6 p-5 sm:p-6">
+        <div className="grid gap-4 xl:grid-cols-[1.25fr_0.9fr]">
+          <div className="section-card space-y-4">
+            <div className="flex flex-wrap items-center gap-3">
+              {!isRecording ? (
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={startRecording}
+                  disabled={isTranscribing || isExtracting}
+                >
+                  Start recording
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="btn-danger"
+                  onClick={stopRecording}
+                >
+                  Stop recording
+                </button>
+              )}
 
-      {!!error && (
-        <div className="mt-4 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
-          {error}
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isRecording || isTranscribing}
+              >
+                Upload audio
+              </button>
+
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={extractDraft}
+                disabled={
+                  isTranscribing || isExtracting || !compactText(transcript)
+                }
+              >
+                {isExtracting ? "Extracting..." : "Extract structured draft"}
+              </button>
+
+              <input
+                ref={fileInputRef}
+                className="hidden"
+                type="file"
+                accept="audio/*,.m4a,.mp3,.wav,.webm"
+                onChange={(event) =>
+                  handleFileSelect(event.target.files?.[0] || null)
+                }
+              />
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <div className="chip">Status: {status}</div>
+              <div className="chip">Language hint: {languageHint || "—"}</div>
+              <div className="chip">
+                Duration: {duration ? `${duration.toFixed(1)} s` : "—"}
+              </div>
+              <div className="chip">
+                Source:{" "}
+                {audioFileName || transcribeModel || "Manual transcript"}
+              </div>
+            </div>
+
+            <div>
+              <label className="field-label">Transcript</label>
+              <textarea
+                className="field-textarea min-h-[260px]"
+                value={transcript}
+                onChange={(event) => setTranscript(event.target.value)}
+                placeholder="Paste or record the bilingual transcript here."
+              />
+              <div className="field-hint">
+                Edit the transcript if the ASR missed wording, then run
+                extraction again.
+              </div>
+            </div>
+
+            {error ? (
+              <div className="rounded-2xl border border-[rgba(var(--danger),0.2)] bg-[rgba(var(--danger),0.06)] px-4 py-3 text-sm text-[rgb(var(--danger))]">
+                {error}
+              </div>
+            ) : null}
+          </div>
+
+          <div className="section-card space-y-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="field-label mb-0">
+                  Structured draft snapshot
+                </div>
+                <div className="field-hint mt-1">
+                  Quick read before applying it to the main form.
+                </div>
+              </div>
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => draft && onApplyDraft(draft)}
+                disabled={!draft}
+              >
+                Apply to form
+              </button>
+            </div>
+
+            {draft ? (
+              <div className="space-y-4">
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="metric-card">
+                    <div className="metric-label">Patient</div>
+                    <div className="mt-1 text-base font-semibold">
+                      {draft.patientName || "—"}
+                    </div>
+                    <div className="mt-1 text-xs text-[rgb(var(--muted))]">
+                      MRN {draft.caseNumber || "—"} • {draft.sex || "—"} •{" "}
+                      {draft.age || "—"}
+                    </div>
+                  </div>
+                  <div className="metric-card">
+                    <div className="metric-label">Likely diagnosis</div>
+                    <div className="mt-1 text-base font-semibold">
+                      {draft.aiClinicalSupport?.likelyDiagnosis ||
+                        draft.diagnosisHints[0] ||
+                        "—"}
+                    </div>
+                    <div className="mt-1 text-xs text-[rgb(var(--muted))]">
+                      Confidence: {draft.aiClinicalSupport?.confidence || "—"}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--card))] p-4">
+                  <div className="text-sm font-semibold">
+                    Internal AI clinical support
+                  </div>
+                  <p className="mt-2 text-sm leading-6 text-[rgb(var(--muted))]">
+                    {draft.aiClinicalSupport?.summary ||
+                      draft.aiSuggestion ||
+                      "No AI clinical support generated."}
+                  </p>
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--card))] p-4">
+                    <div className="text-sm font-semibold">
+                      Documented medications
+                    </div>
+                    <ul className="mt-2 space-y-2 text-sm text-[rgb(var(--muted))]">
+                      {draft.medications.length ? (
+                        draft.medications.map((item, index) => (
+                          <li key={`${item.medication}-${index}`}>
+                            {item.medication ||
+                              item.rawMedication ||
+                              "Unnamed medication"}
+                            {item.dose ? ` • ${item.dose}` : ""}
+                            {item.how ? ` • ${item.how}` : ""}
+                          </li>
+                        ))
+                      ) : (
+                        <li>—</li>
+                      )}
+                    </ul>
+                  </div>
+
+                  <div className="rounded-2xl border border-[rgb(var(--border))] bg-[rgb(var(--card))] p-4">
+                    <div className="text-sm font-semibold">Server timings</div>
+                    <ul className="mt-2 space-y-2 text-sm text-[rgb(var(--muted))]">
+                      {draft.timings?.steps?.length ? (
+                        draft.timings.steps.map((step) => (
+                          <li key={step.step}>
+                            {step.step}: {formatMs(step.ms)}
+                          </li>
+                        ))
+                      ) : (
+                        <li>Total: {formatMs(draft.timings?.totalMs)}</li>
+                      )}
+                    </ul>
+                  </div>
+                </div>
+
+                {draft.warnings.length ? (
+                  <div className="rounded-2xl border border-[rgba(var(--warning),0.25)] bg-[rgba(var(--warning),0.08)] p-4 text-sm text-[rgb(var(--text))]">
+                    <div className="font-semibold">Warnings</div>
+                    <ul className="mt-2 list-disc space-y-1 pl-5 text-[rgb(var(--muted))]">
+                      {draft.warnings.map((warning) => (
+                        <li key={warning}>{warning}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </div>
+            ) : (
+              <div className="rounded-2xl border border-dashed border-[rgb(var(--border))] bg-[rgb(var(--surface-alt))] p-6 text-sm text-[rgb(var(--muted))]">
+                No draft yet. Humans call this the waiting room.
+              </div>
+            )}
+          </div>
         </div>
-      )}
+      </div>
     </section>
   );
 }
