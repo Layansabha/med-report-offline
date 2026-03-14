@@ -44,6 +44,19 @@ export type StructuredDraft = {
 
 type StructuredPayload = Omit<StructuredDraft, "transcript">;
 
+type AiSupportConfidence = "low" | "medium" | "high";
+
+type AiClinicalSupportPayload = {
+  summary: string;
+  likelyDiagnosis: string;
+  reasoning: string;
+  currentTreatment: string;
+  medicationOptions: string[];
+  nextSteps: string[];
+  redFlags: string[];
+  confidence: AiSupportConfidence;
+};
+
 type SystemCatalogEntry = {
   id: string;
   name: string;
@@ -220,6 +233,84 @@ function normalizeStructuredPayload(value: unknown): StructuredPayload {
   };
 }
 
+function normalizeConfidence(value: unknown): AiSupportConfidence {
+  const normalized = safeString(value).toLowerCase();
+  if (normalized === "high") return "high";
+  if (normalized === "medium") return "medium";
+  return "low";
+}
+
+function normalizeAiSupportPayload(value: unknown): AiClinicalSupportPayload {
+  const payload = (value ?? {}) as Record<string, unknown>;
+
+  return {
+    summary: safeString(payload.summary),
+    likelyDiagnosis: safeString(payload.likelyDiagnosis),
+    reasoning: safeString(payload.reasoning),
+    currentTreatment: safeString(payload.currentTreatment),
+    medicationOptions: Array.isArray(payload.medicationOptions)
+      ? dedupeStrings(payload.medicationOptions.map((item) => safeString(item)))
+      : [],
+    nextSteps: Array.isArray(payload.nextSteps)
+      ? dedupeStrings(payload.nextSteps.map((item) => safeString(item)))
+      : [],
+    redFlags: Array.isArray(payload.redFlags)
+      ? dedupeStrings(payload.redFlags.map((item) => safeString(item)))
+      : [],
+    confidence: normalizeConfidence(payload.confidence),
+  };
+}
+
+function formatMedicationSummary(medications: ScribeMedication[]) {
+  const parts = medications
+    .map((item) => {
+      const med = safeString(item.medication || item.rawMedication);
+      const dose = safeString(item.dose);
+      const how = safeString(item.how);
+      const joined = [med, dose].filter(Boolean).join(" ").trim();
+      return [joined, how ? `(${how})` : ""].filter(Boolean).join(" ").trim();
+    })
+    .filter(Boolean);
+
+  return parts.join("; ");
+}
+
+function formatAiSupportText(payload: AiClinicalSupportPayload) {
+  const lines: string[] = [];
+
+  if (payload.summary) {
+    lines.push(`Summary: ${payload.summary}`);
+  }
+  if (payload.likelyDiagnosis) {
+    lines.push(`Likely diagnosis: ${payload.likelyDiagnosis}`);
+  }
+  if (payload.reasoning) {
+    lines.push(`Why this fits: ${payload.reasoning}`);
+  }
+  if (payload.currentTreatment) {
+    lines.push(`Current documented treatment: ${payload.currentTreatment}`);
+  }
+  if (payload.medicationOptions.length) {
+    lines.push(
+      `Common options to consider: ${payload.medicationOptions.join("; ")}`,
+    );
+  }
+  if (payload.nextSteps.length) {
+    lines.push(`Suggested next steps: ${payload.nextSteps.join("; ")}`);
+  }
+  if (payload.redFlags.length) {
+    lines.push(`Red flags: ${payload.redFlags.join("; ")}`);
+  }
+  lines.push(
+    `Confidence: ${payload.confidence[0].toUpperCase()}${payload.confidence.slice(1)}`,
+  );
+  lines.push(
+    "Internal support only. Final diagnosis and treatment decisions require clinician review.",
+  );
+
+  return lines.join("\n").trim();
+}
+
 async function loadSystemCatalog(): Promise<SystemCatalogEntry[]> {
   try {
     const systemsPath = path.join(process.cwd(), "public", "systems.json");
@@ -311,7 +402,6 @@ function buildSchema() {
       nextReviewMode: { type: "string" },
       beforeNextReview: { type: "string" },
       notes: { type: "string" },
-      aiSuggestion: { type: "string" },
       medications: {
         type: "array",
         items: {
@@ -365,7 +455,6 @@ function buildSchema() {
       "nextReviewMode",
       "beforeNextReview",
       "notes",
-      "aiSuggestion",
       "medications",
       "warnings",
     ],
@@ -420,7 +509,7 @@ function buildPrompts(
   const systemPrompt = `
 You are a medical documentation extraction assistant.
 
-Your task is to extract structured clinical information from a dictated transcript.
+Your task is to extract structured clinical information from a dictated visit transcript.
 The transcript may contain Arabic, English, or mixed Arabic-English speech in the same sentence.
 
 Return ONLY valid JSON that matches the required schema exactly.
@@ -430,18 +519,17 @@ Important rules:
 - If a field is not mentioned, return an empty string for text fields or an empty array for list fields.
 - Do not invent facts.
 - Do not guess unsupported diagnoses or unsupported treatments.
-- Patient name should be written in English spelling when spoken in Arabic, using best-effort transliteration.
+- Patient names spoken in Arabic should be written in natural English spelling using best-effort transliteration.
 - Keep medication names exactly as clinically intended.
-- Preserve medically relevant wording.
 - Use concise, clean clinical English in extracted fields.
 - Do not output markdown.
 - Do not output explanations.
 - Do not output anything except valid JSON.
 
 Field extraction guidance:
-- patientName: extract full patient name and transliterate Arabic names into English spelling if needed
+- patientName: extract the full patient name and transliterate Arabic names into English spelling when needed
 - caseNumber: extract MRN, case number, or file number
-- dob: extract date of birth if explicitly stated
+- dob: extract date of birth only if stated
 - age: extract age if stated
 - sex: extract male/female if stated
 - occupation: extract occupation if stated
@@ -449,35 +537,41 @@ Field extraction guidance:
 - carer: extract carer or representative if stated
 - allergies: extract known allergies if stated
 - intolerances: extract medication intolerances if stated
-- chiefComplaint: extract main reason for visit
+- chiefComplaint: extract the main reason for visit
 - significantHistory: extract important past medical history
-- associatedSymptoms: extract symptoms clearly associated with the complaint
-- examFindings: extract examination findings, vitals, or documented observations
+- associatedSymptoms: extract symptoms clearly linked to the complaint
+- examFindings: extract examination findings, vital signs, and documented observations
 - labSummary: extract laboratory information if stated
 - imagingSummary: extract imaging information if stated
-- diagnosisHints: extract likely documented diagnoses explicitly supported by the transcript
+- diagnosisHints: extract likely documented diagnoses clearly supported by the transcript
 - reviewCompletedBy: extract if stated
 - treatmentGoals: extract if stated
-- nextReviewDate: extract if stated
-- nextReviewMode: extract if stated
-- beforeNextReview: extract follow-up steps before next review
-- notes: extract additional useful clinical notes that do not fit cleanly elsewhere
-- medications: extract each medication row separately with:
-  systemId, diagnosis, rawMedication, medication, dose, how, purpose, plan
-- warnings: include extraction uncertainty or safety warnings only when needed
+- nextReviewDate: extract if a clear next review date is stated
+- nextReviewMode: extract In-person or Video only when clearly supported
+- beforeNextReview: extract tasks or monitoring requested before the next review
+- notes: extract clinically useful extra information that does not fit cleanly elsewhere
+- warnings: only include extraction or uncertainty warnings when needed
 
 Medication extraction rules:
-- Split medication name from dose whenever possible
-- Preserve exact medication identity
-- Extract how-to-take instructions as completely as possible
-- Extract purpose only if stated
-- Extract agreed plan only if stated
-- If multiple medications are mentioned, return multiple medication rows
-- Do not merge distinct medications into one row
-- Do not drop a medication that is clearly stated
+- Extract each medication as a separate row.
+- Do not merge distinct medications into one row.
+- Do not drop a medication that is clearly stated.
+- Preserve the exact medication identity.
+- Split medication name from dose whenever possible.
+- Keep how-to-take instructions as completely as possible.
+- If the transcript says "one tablet twice daily after meals", keep the full instruction, not a shortened fragment.
+- Keep purpose only if stated or strongly implied by the same medication statement.
+- Keep agreed plan only if stated.
+- Map systemId to the closest supported system when diagnosis or system is clear from the transcript and the available systems list.
 
-${medicationHints ? `Medication hints:\n${medicationHints}` : ""}
+${
+  medicationHints
+    ? `Medication hints:
+${medicationHints}`
+    : ""
+}
 `.trim();
+
   const userPrompt = [
     "Schema:",
     JSON.stringify(schema),
@@ -487,6 +581,96 @@ ${medicationHints ? `Medication hints:\n${medicationHints}` : ""}
     "",
     "Transcript:",
     transcript,
+  ].join("\n");
+
+  return { systemPrompt, userPrompt };
+}
+
+function buildAiSupportSchema() {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      summary: { type: "string" },
+      likelyDiagnosis: { type: "string" },
+      reasoning: { type: "string" },
+      currentTreatment: { type: "string" },
+      medicationOptions: { type: "array", items: { type: "string" } },
+      nextSteps: { type: "array", items: { type: "string" } },
+      redFlags: { type: "array", items: { type: "string" } },
+      confidence: { type: "string" },
+    },
+    required: [
+      "summary",
+      "likelyDiagnosis",
+      "reasoning",
+      "currentTreatment",
+      "medicationOptions",
+      "nextSteps",
+      "redFlags",
+      "confidence",
+    ],
+  };
+}
+
+function buildAiSupportPrompts(
+  transcript: string,
+  structured: StructuredPayload,
+  medications: ScribeMedication[],
+) {
+  const structuredInput = {
+    patientName: structured.patientName,
+    age: structured.age,
+    sex: structured.sex,
+    chiefComplaint: structured.chiefComplaint,
+    significantHistory: structured.significantHistory,
+    associatedSymptoms: structured.associatedSymptoms,
+    examFindings: structured.examFindings,
+    labSummary: structured.labSummary,
+    imagingSummary: structured.imagingSummary,
+    diagnosisHints: structured.diagnosisHints,
+    currentTreatment: formatMedicationSummary(medications),
+    medications,
+    treatmentGoals: structured.treatmentGoals,
+    nextReviewDate: structured.nextReviewDate,
+    nextReviewMode: structured.nextReviewMode,
+    beforeNextReview: structured.beforeNextReview,
+    notes: structured.notes,
+  };
+
+  const systemPrompt = `
+You are an internal clinical support assistant for a medical documentation app.
+
+This output is INTERNAL ONLY for the clinician or staff member inside the app.
+It must never be included in the printable patient report.
+
+Use only the transcript and extracted structured data that you are given.
+Be helpful, practical, and professionally cautious.
+
+Rules:
+- Do not invent facts that are not supported by the transcript or structured data.
+- If information is incomplete, say so clearly.
+- You may suggest likely diagnoses, common medication approaches, next steps, and red flags, but always use cautious wording such as: likely, possible, may consider, commonly used, depending on clinical assessment.
+- If medications are already documented, mention them as current documented treatment.
+- Do not recommend adding a medication that is already documented.
+- Do not suggest specialist referral unless clearly supported.
+- Do not present a definitive diagnosis unless the case strongly supports it.
+- Do not use markdown.
+- Output plain English only.
+- Return valid JSON only.
+
+The medicationOptions field may include common options that are often considered for the likely diagnosis, but they must be phrased as possibilities for clinician consideration, not definitive prescriptions.
+`.trim();
+
+  const userPrompt = [
+    "Transcript:",
+    transcript,
+    "",
+    "Structured data:",
+    JSON.stringify(structuredInput, null, 2),
+    "",
+    "Return this exact JSON shape:",
+    JSON.stringify(buildAiSupportSchema()),
   ].join("\n");
 
   return { systemPrompt, userPrompt };
@@ -612,10 +796,57 @@ async function callGroqExtraction(
   return normalizeStructuredPayload(parsed);
 }
 
+async function callGroqAiSupport(
+  transcript: string,
+  structured: StructuredPayload,
+  medications: ScribeMedication[],
+): Promise<string> {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) {
+    return "AI clinical support unavailable because GROQ_API_KEY is missing.";
+  }
+
+  const model = process.env.GROQ_SUPPORT_MODEL || DEFAULT_TEXT_MODEL;
+  const schema = buildAiSupportSchema();
+  const { systemPrompt, userPrompt } = buildAiSupportPrompts(
+    transcript,
+    structured,
+    medications,
+  );
+
+  try {
+    const content = await requestGroqExtraction({
+      model,
+      systemPrompt,
+      userPrompt,
+      responseFormat: { type: "json_object" },
+    });
+
+    const parsed = safeParseJson<AiClinicalSupportPayload>(content);
+    if (!parsed) {
+      const fallback = safeString(content);
+      return (
+        fallback ||
+        "AI clinical support was not generated from the current transcript."
+      );
+    }
+
+    const normalized = normalizeAiSupportPayload(parsed);
+    const formatted = formatAiSupportText(normalized);
+    return (
+      formatted ||
+      "AI clinical support was not generated from the current transcript."
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return `AI clinical support unavailable. ${message}`.trim();
+  }
+}
+
 export async function extractStructuredDraft(
   rawTranscript: string,
 ): Promise<StructuredDraft> {
-  const transcript = compactText(rawTranscript);
+  const transcript = (rawTranscript || "").replace(/\r/g, "").trim();
 
   if (!transcript) {
     return {
@@ -654,6 +885,11 @@ export async function extractStructuredDraft(
   const medications = structured.medications.map((item) =>
     mapMedicationToSystem(item, systemCatalog),
   );
+  const aiSuggestion = await callGroqAiSupport(
+    transcript,
+    structured,
+    medications,
+  );
 
   return {
     transcript,
@@ -680,7 +916,7 @@ export async function extractStructuredDraft(
     nextReviewMode: structured.nextReviewMode,
     beforeNextReview: structured.beforeNextReview,
     notes: structured.notes,
-    aiSuggestion: structured.aiSuggestion,
+    aiSuggestion,
     medications,
     warnings: dedupeStrings(structured.warnings),
   };

@@ -108,7 +108,7 @@ function summarizeAppliedResult(result: ScribeDraft | null) {
   if (result.occupation?.trim()) parts.push("occupation");
   if (result.supervisingDoctor?.trim()) parts.push("supervising doctor");
   if (result.significantHistory?.trim()) parts.push("history");
-  if (result.aiSuggestion?.trim()) parts.push("AI suggestion");
+  if (result.aiSuggestion?.trim()) parts.push("AI clinical support");
   if ((result.medications?.length ?? 0) > 0) {
     parts.push(
       `${result.medications!.length} medication${

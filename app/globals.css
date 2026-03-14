@@ -4,7 +4,7 @@
 
 @layer base {
   :root {
-    /* Clinic-grade calm palette */
+    /* Calm hospital palette */
     --bg: 245 247 250;
     --surface: 255 255 255;
     --card: 252 253 255;
@@ -12,6 +12,7 @@
     --text: 15 23 42;
     --muted: 71 85 105;
     --primary: 2 132 199;
+    --ring: 14 116 144;
   }
 
   body {
@@ -29,8 +30,9 @@
   .no-print {
     display: none !important;
   }
-  .print-only {
-    display: block !important;
+  .print-card {
+    box-shadow: none !important;
+    border: none !important;
   }
   body {
     -webkit-print-color-adjust: exact;
