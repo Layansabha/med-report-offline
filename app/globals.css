@@ -92,6 +92,8 @@ p {
   z-index: 30;
   padding: 18px 18px 0;
   backdrop-filter: blur(12px);
+  background: rgba(59, 131, 246, 0.137);
+  border-bottom: 1px solid rgba(59, 131, 246, 0.712);
 }
 
 .clinic-main {
